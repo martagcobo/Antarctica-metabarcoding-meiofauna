@@ -18,6 +18,8 @@ The scripts provided here reproduce the main figures, diversity metrics, and sta
 
 ## Repository Structure
 
-* `scripts/`: Contains all R scripts for data wrangling, mapping, and plotting.
-* `data/`: Contains the clean datasets (e.g., `edges_limpios.csv`, `taxa_counts_meiofauna.csv`) required to run the code. *(Note: Raw sequencing data and large files >100MB are hosted separately).*
+* `scripts/`: Contains R script for ecological analyses.
+ (Bioinformatic analyses were performed following NGSmeioR workflow: https://github.com/amartinezgarcia/NGSmeioR.git)
+
+* `data/`: Contains the datasets required to run the attached R script.
 
