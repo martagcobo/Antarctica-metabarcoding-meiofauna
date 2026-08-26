@@ -8,7 +8,7 @@
 
 
 ##### 1. Set working directory -------------------------------------------------
-# Set to your local folder (Update this path as needed)
+# Set to your local folder 
 setwd("C:")
 
 ##### 2. Load packages ---------------------------------------------------------
@@ -1541,20 +1541,35 @@ for (i in seq_len(nrow(datasets_ext))) {
   
   data <- read.csv(datasets_ext$filename[i], sep = ";", stringsAsFactors = FALSE)
   
+  # Extraer vector de similitud (buscando en columna directa o en 'label')
+  raw_sim <- if ("similitud" %in% colnames(data)) {
+    data$similitud
+  } else if ("pident.max" %in% colnames(data)) {
+    data$pident.max
+  } else if ("pident" %in% colnames(data)) {
+    data$pident
+  } else if ("label" %in% colnames(data)) {
+    str_split_i(data$label, "\\|", 4)
+  } else {
+    NA
+  }
+  
+  # ASIGNAR Y LIMPIAR COMAS ANTES DEL FILTRO para no romper dimensiones
+  data$similitud <- as.numeric(gsub(",", ".", as.character(raw_sim)))
+  
   clean_data <- data %>%
     filter(Eval.result == "correct") %>%
     distinct(ASVid, .keep_all = TRUE) %>%
     mutate(
-      similitud = as.numeric(str_split_i(label, "\\|", 4)),
-      phylum    = str_split_i(label, "\\|", 1),
-      nreads    = as.numeric(nreads)
+      phylum = if("label" %in% colnames(data)) str_split_i(label, "\\|", 1) else Best.group,
+      nreads = as.numeric(nreads)
     )
   
   # A. Summary Lists: All ASVs
   all_global_list[[i]] <- data.frame(
-    Dataset = datasets_ext$dataset_name[i],
+    Dataset     = datasets_ext$dataset_name[i],
     Total_Reads = sum(clean_data$nreads, na.rm = TRUE),
-    Total_ASVs = nrow(clean_data)
+    Total_ASVs  = nrow(clean_data)
   )
   
   all_phylum_list[[i]] <- clean_data %>%
@@ -1563,14 +1578,16 @@ for (i in seq_len(nrow(datasets_ext))) {
     summarise(Total_Unique_ASVs = n(), .groups = "drop") %>%
     mutate(Dataset = datasets_ext$dataset_name[i])
   
-  # B. Summary Lists: Meiofauna
+  # B. Summary Lists: Meiofauna (Incluyendo porcentaje total global <95%)
   meio_data <- clean_data %>%
     filter(Tax.eco.meio == "TRUE" | Tax.eco.meio == TRUE)
   
   meio_global_list[[i]] <- data.frame(
-    Dataset = datasets_ext$dataset_name[i],
-    Total_Reads = sum(meio_data$nreads, na.rm = TRUE),
-    Total_ASVs = nrow(meio_data)
+    Dataset      = datasets_ext$dataset_name[i],
+    Total_Reads  = sum(meio_data$nreads, na.rm = TRUE),
+    Total_ASVs   = nrow(meio_data),
+    ASVs_under95 = sum(meio_data$similitud < 95.0, na.rm = TRUE),
+    Perc_under95 = mean(meio_data$similitud < 95.0, na.rm = TRUE) * 100
   )
   
   meio_phylum_list[[i]] <- meio_data %>%
@@ -1588,6 +1605,7 @@ for (i in seq_len(nrow(datasets_ext))) {
     select(ASVid, Best.group = phylum, nreads) %>%
     mutate(dataset = datasets_ext$ref_id[i])
 }
+
 
 # 3. Process Antarctic Data (Ref1: Quality-Filtered & Post-27 Noise Threshold, Unrarefied)
 
@@ -1607,30 +1625,34 @@ ant_asvs_clean <- species_tot %>%
 ant_meio_clean <- ant_asvs_clean %>%
   filter(Tax.eco.meio %in% c("TRUE", TRUE, 1, "permanent"))
 
-# Table Summaries for Antarctica (Post-27 noise filter, unrarefied)
+# Table Summaries for Antarctica (All ASVs)
 ant_global_all <- tibble(
-  Dataset = "Antarctica", 
+  Dataset     = "Antarctica", 
   Total_Reads = sum(comm_ant_27[, ant_asvs_clean$ASVid]), 
-  Total_ASVs = n_distinct(ant_asvs_clean$ASVid)
+  Total_ASVs  = n_distinct(ant_asvs_clean$ASVid)
 )
+
 ant_phylum_all <- ant_asvs_clean %>% 
   group_by(phylum = Best.group) %>% 
   summarise(Total_Unique_ASVs = n_distinct(ASVid), .groups = "drop") %>% 
   mutate(Dataset = "Antarctica")
 
+# Table Summaries for Antarctica (Meiofauna - con novedad total)
 comm_ant_meio <- comm_ant_27[, ant_meio_clean$ASVid, drop = FALSE]
 
 ant_global_meio <- tibble(
-  Dataset = "Antarctica", 
-  Total_Reads = sum(comm_ant_meio), 
-  Total_ASVs = n_distinct(ant_meio_clean$ASVid)
+  Dataset      = "Antarctica", 
+  Total_Reads  = sum(comm_ant_meio), 
+  Total_ASVs   = n_distinct(ant_meio_clean$ASVid),
+  ASVs_under95 = sum(ant_meio_clean$pident.max < 95, na.rm = TRUE),
+  Perc_under95 = mean(ant_meio_clean$pident.max < 95, na.rm = TRUE) * 100
 )
 
 ant_phylum_meio <- ant_meio_clean %>%
   group_by(phylum = Best.group) %>%
   summarise(
     Total_Unique_ASVs = n_distinct(ASVid),
-    Perc_under_95 = mean(pident.max < 95, na.rm = TRUE) * 100,
+    Perc_under_95     = mean(pident.max < 95, na.rm = TRUE) * 100,
     .groups = "drop"
   ) %>%
   mutate(Dataset = "Antarctica")
@@ -1644,8 +1666,10 @@ ant_meio_df <- ant_meio_clean %>%
   ) %>%
   select(dataset, ASVid, Best.group, nreads)
 
+
 # 4. Construct Single Master Dataframe (Ref_maestra)
 Ref_maestra <- bind_rows(ant_meio_df, bind_rows(ext_meio_master))
+
 
 # 5. Format and Export Tables 1, 2, and 3
 all_global_clean  <- bind_rows(c(all_global_list, list(ant_global_all)))
@@ -1667,30 +1691,39 @@ format_summary_table <- function(global_df, phylum_df) {
 
 table1_all       <- format_summary_table(all_global_clean, all_phylum_clean)
 table2_meiofauna <- format_summary_table(meio_global_clean, meio_phylum_clean)
-table3_under95   <- meio_phylum_clean %>%
+
+# Table 3: Taxonomic novelty  
+overall_novelty_row <- meio_global_clean %>%
+  select(Dataset, Perc_under95) %>%
+  pivot_wider(names_from = Dataset, values_from = Perc_under95) %>%
+  mutate(phylum = "Overall ASVs <95% identity (%)")
+
+phylum_novelty_matrix <- meio_phylum_clean %>%
   select(Dataset, phylum, Perc_under_95) %>%
   pivot_wider(names_from = Dataset, values_from = Perc_under_95, values_fill = 0) %>%
   arrange(phylum)
 
+table3_under95 <- bind_rows(overall_novelty_row, phylum_novelty_matrix)
+
+# 
 write_csv(table1_all, "Table1_All_ASVs_and_Reads.csv")
 write_csv(table2_meiofauna, "Table2_Meiofauna_ASVs_and_Reads.csv")
 write_csv(table3_under95, "Table3_Phylum_Matrix_Unique_Under95.csv")
 
-# 6. Export Filtered Species Metadata (All original columns retained) ----------------
 
-# A. Complete filtered dataset for Antarctica (Table 1: All ASVs post-27 threshold)
+# 6. Export Filtered Species Metadata ----------------
+
 species_ant_filtered_all <- species_tot %>%
   filter(ASVid %in% ant_asvs_clean$ASVid) %>%
-  mutate(nreads_post27 = ant_active_reads[ASVid]) # Añade el total de lecturas pos-filtro
+  mutate(nreads_post27 = ant_active_reads[ASVid])
 
-# B. Meiofauna-only filtered dataset for Antarctica (Table 2)
 species_ant_filtered_meio <- species_tot %>%
   filter(ASVid %in% ant_meio_clean$ASVid) %>%
   mutate(nreads_post27 = ant_meio_reads[ASVid])
 
-# Export to CSV
 write_csv(species_ant_filtered_all, "Species_Antarctica_Filtered_Table1_All.csv")
 write_csv(species_ant_filtered_meio, "Species_Antarctica_Filtered_Table2_Meiofauna.csv")
+
 
 # Section 2: NETWORK COMPARISON & SHARED ASVs----------------------------------------
 
@@ -1935,6 +1968,7 @@ figure_S2 <- ggiNEXT(inext_out, type = 3) +
 
 ggsave("Figure_S2_Rarefaction.png", plot = figure_S2, width = 8, height = 6, dpi = 300)
 
+
 # Section 4: FIGURE 1 - SAMPLING MAPS------------------------------
 
 # 1. Ross Sea Satellite Zoom
@@ -2020,57 +2054,3 @@ plot_heatmap <- ggplot(df_plot, aes(x = Ref, y = taxa)) +
 print(plot_heatmap)
 
 
-
-
-### Figure S1: Gaussian Distribution of ASVs < 95% Identity ----------------
-
-# 1. Extract Global Percentages (<95% identity) directly from Section 1 Data
-
-# External published studies
-published_vals <- sapply(seq_len(nrow(datasets_ext)), function(i) {
-  data <- read.csv(datasets_ext$filename[i], sep = ";", stringsAsFactors = FALSE)
-  meio <- data %>% 
-    filter(Eval.result == "correct", Tax.eco.meio %in% c("TRUE", TRUE)) %>%
-    mutate(similitud = as.numeric(str_split_i(label, "\\|", 4)))
-  mean(meio$similitud < 95.0, na.rm = TRUE) * 100
-})
-
-# Present study (Antarctica, post-27 noise threshold)
-our_study_val <- mean(ant_meio_clean$pident.max < 95.0, na.rm = TRUE) * 100
-
-
-# 2. Statistical Calculations (Fitted Gaussian Curve)
-mean_val <- mean(published_vals, na.rm = TRUE)
-sd_val   <- sd(published_vals, na.rm = TRUE)
-
-# Dynamic X-axis range for curve rendering
-x_min <- max(0, min(c(published_vals, our_study_val)) - 10)
-x_max <- min(100, max(c(published_vals, our_study_val)) + 10)
-x_val <- seq(x_min, x_max, length.out = 300)
-
-df_curve     <- data.frame(x = x_val, y = dnorm(x_val, mean = mean_val, sd = sd_val))
-df_published <- data.frame(x = published_vals, y = dnorm(published_vals, mean = mean_val, sd = sd_val))
-df_our       <- data.frame(x = our_study_val, y = dnorm(our_study_val, mean = mean_val, sd = sd_val))
-
-
-# 3. Render and Save Figure S1
-figure_S1 <- ggplot() +
-  # Gaussian Curve
-  geom_line(data = df_curve, aes(x = x, y = y), linewidth = 1, color = "black") +
-  # Benchmark Studies (Red Dots)
-  geom_point(data = df_published, aes(x = x, y = y), color = "red", size = 3.5) +
-  # Present Study (Blue Triangle)
-  geom_point(data = df_our, aes(x = x, y = y), shape = 17, color = "blue", size = 5) +
-  # Theme and Formatting
-  labs(
-    x = "percentage",
-    y = "density"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    axis.text = element_text(color = "black")
-  )
-
-ggsave("Figure_S1_Gaussian_Novelty.png", plot = figure_S1, width = 7, height = 6, dpi = 300)
