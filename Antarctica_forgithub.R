@@ -2,14 +2,14 @@
 # Antarctic meiofauna metabarcoding paper
 #
 # Script by: anonymus until peer-review is finished
-# Last update: 17/05/2026
+# Last update: 26/08/2026
 
 ###########################
 
 
 ##### 1. Set working directory -------------------------------------------------
 # Set to your local folder (Update this path as needed)
-setwd("C:/")
+setwd("C:")
 
 ##### 2. Load packages ---------------------------------------------------------
 # Data manipulation and visualization
@@ -58,147 +58,114 @@ library(ggraph)    # To draw networks
 library(pheatmap)
 library(writexl)   # ADDED: Required for write_xlsx
 
+library(iNEXT) # rarefaction
+library(parallel) # for computational effort
 
 
-#### 3. Prepare files ----------------------------------------------------------
+#### Data Preparation -------------------------------------
 
-# Load base data
-ecol_base <- read.csv2("Antarctica marine MBC samples.csv")
+# 1. LOAD RAW DATA 
+ecol_base    <- read.csv2("Antarctica marine MBC samples.csv")
 species_base <- read.csv2("Data18S_Antarctica_v2.csv")
-comm_base <- read.csv2("Antarctica_community.csv")
 
-# Clean sequences
-species_base <- species_base[
+# Load community matrix with row.names = 1 to keep ALL raw counts untouched
+comm_raw_base <- read.csv2("Antarctica_community.csv", row.names = 1)
+
+# Remove non-target rows if applicable
+comm_raw <- comm_raw_base[-(211:218), ]
+comm_raw <- comm_raw[-(81:88), ]
+
+# Ensure all columns are numeric ASV counts
+comm_raw <- comm_raw[, sapply(comm_raw, is.numeric)]
+
+
+# 2. SYNCHRONIZE METADATA AND COMMUNITY MATRIX
+common_ids <- intersect(rownames(comm_raw), ecol_base$sample_ID)
+
+comm_raw <- comm_raw[common_ids, ]
+ecol     <- ecol_base[match(common_ids, ecol_base$sample_ID), ]
+
+stopifnot(all(rownames(comm_raw) == ecol$sample_ID))
+
+# Filter NAs in ecological variables
+ecol <- ecol[!is.na(ecol$depth) &
+               !is.na(ecol$habitat_norm) &
+               !is.na(ecol$Mesh), ]
+
+comm_raw <- comm_raw[match(ecol$sample_ID, rownames(comm_raw)), ]
+
+
+# 3. RAREFY THE COMPLETE RAW COMMUNITY
+set.seed(123) # For reproducibility
+
+min_depth_tot <- min(rowSums(comm_raw))
+cat("Rarefying total raw community to:", min_depth_tot, "reads\n")
+
+# Global rarefaction
+comm_tot_rar <- rrarefy(comm_raw, sample = min_depth_tot)
+
+
+# 4. PREPARE SPECIES FILTERS AND APPLY POST-RAREFACTION NOISE FILTER
+species_clean <- species_base[
   !is.na(species_base$ASVid) &
     !is.na(species_base$sequence) &
     nzchar(species_base$sequence), 
 ]
 
-# Prepare species dataframe (using which() to avoid NA issues)
-species_tot <- species_base[which(species_base$Eval.result == "correct"), ]
+species_tot <- species_clean[which(species_clean$Eval.result == "correct"), ]
 species_tot <- species_tot[which(species_tot$rare.asvs == "FALSE"), ]
 species_tot <- species_tot[!duplicated(species_tot$ASVid), ]
 
-# Meiofauna subset
-species <- species_tot[which(species_tot$Tax.eco.meio == "TRUE"), ]
+species_meio <- species_tot[which(species_tot$Tax.eco.meio %in% c("TRUE", TRUE, 1, "permanent")), ]
 
-# Prepare community matrix
-rownames(comm_base) <- comm_base$sample_ID
+# Filter correct & non-rare ASVs
+comm_tot_valid <- comm_tot_rar[, colnames(comm_tot_rar) %in% species_tot$ASVid]
 
-# Remove specific rows/cols (Update indices if data changes)
-comm_base <- comm_base[-(211:218), -c(1,2)] 
-comm_base <- comm_base[-(81:88), ]
+# Apply noise threshold (< 27 reads per sample = 0)
+comm_tot_valid[comm_tot_valid < 27] <- 0
 
-# Remove misstags
-comm_base[comm_base < 27] <- 0
+# Subset to Meiofauna ASVs
+comm_meio <- comm_tot_valid[, colnames(comm_tot_valid) %in% species_meio$ASVid]
 
-# --- TOTAL COMMUNITY ---
-comm_tot <- comm_base[, colnames(comm_base) %in% species_tot$ASVid]
 
-# Keep only common samples
-common_ids_tot <- intersect(rownames(comm_tot), ecol_base$sample_ID)
+# 5. CALCULATE FINAL METRICS
+ecol$total_reads_raw   <- rowSums(comm_raw)
+ecol$meio_reads_final  <- rowSums(comm_meio)
+ecol$richness_meio_rar <- rowSums(comm_meio > 0)
 
-comm_tot <- comm_tot[common_ids_tot, ]
-ecol_tot <- ecol_base[match(common_ids_tot, ecol_base$sample_ID), ]
+# Presence/Absence Matrix
+comm_meio_pa <- comm_meio
+comm_meio_pa[comm_meio_pa > 0] <- 1
 
-stopifnot(all(rownames(comm_tot) == ecol_tot$sample_ID))
-
-# Total reads
-ecol_tot$total_reads <- rowSums(comm_tot)
-
-# Filter 0 reads
-ecol_tot <- ecol_tot[ecol_tot$total_reads > 0, ]
-comm_tot <- comm_tot[match(ecol_tot$sample_ID, rownames(comm_tot)), ]
-
-# Presence/absence transformation
-comm_tot[comm_tot > 0] <- 1
-
-# Calculate Richness
-ecol_tot$richness <- rowSums(comm_tot)
-
-# Remove NAs in ecological variables
-ecol_tot <- ecol_tot[!is.na(ecol_tot$depth) &
-                       !is.na(ecol_tot$habitat_norm) &
-                       !is.na(ecol_tot$Mesh), ]
-
-comm_tot <- comm_tot[match(ecol_tot$sample_ID, rownames(comm_tot)), ]
-
-# --- MEIOFAUNA SUBSET ---
-comm <- comm_base[, colnames(comm_base) %in% species$ASVid]
-
-# Keep only common samples
-common_ids <- intersect(rownames(comm), ecol_base$sample_ID)
-
-comm <- comm[common_ids, ]
-ecol <- ecol_base[match(common_ids, ecol_base$sample_ID), ]
-
-stopifnot(all(rownames(comm) == ecol$sample_ID))
-
-# Total reads
-ecol$total_reads <- rowSums(comm)
-
-# Filter 0 reads
-ecol <- ecol[ecol$total_reads > 0, ]
-comm <- comm[match(ecol$sample_ID, rownames(comm)), ]
-
-# Presence/absence transformation
-comm[comm > 0] <- 1
-
-# Calculate Richness
-ecol$richness <- rowSums(comm)
-
-# Remove NAs in ecological variables
-ecol <- ecol[!is.na(ecol$depth) &
-               !is.na(ecol$habitat_norm) &
-               !is.na(ecol$Mesh), ]
-
-comm <- comm[match(ecol$sample_ID, rownames(comm)), ]
-
-# Set factors
-habitat_order <- c("epilithic", "organic", "spicule", "gravel", "sand", "silt")
+# Factor formatting
+habitat_order     <- c("epilithic", "organic", "spicule", "gravel", "sand", "silt")
 ecol$habitat_norm <- factor(ecol$habitat_norm, levels = habitat_order)
-ecol$Mesh <- as.factor(ecol$Mesh)
+ecol$Mesh         <- as.factor(ecol$Mesh)
 
 
-#### 4. Descriptive Data -------------------------------------------------------
 
-# 1. Total ASVs (Total Community)
-cat("Total ASVs (all metazoans):", ncol(comm_tot), "\n")
+## Sensitivity analysis------------------------------------------
 
-cat("\nAll metazoans by group:\n")
-asvs_per_group_tot <- table(species_tot$Best.group)
-print(asvs_per_group_tot)
+# 1. Do two independent rarefactions
+set.seed(123)
+rar_1 <- rrarefy(comm_raw, sample = min(rowSums(comm_raw)))
+set.seed(456)
+rar_2 <- rrarefy(comm_raw, sample = min(rowSums(comm_raw)))
 
-# 2. Total ASVs (Meiofauna subset)
-cat("\nTotal ASVs (Meiofauna):", ncol(comm), "\n")
+# 2. Convert to presence/ absence and calculate Jaccard distance
+d1 <- vegdist((rar_1 > 0)*1, method = "jaccard")
+d2 <- vegdist((rar_2 > 0)*1, method = "jaccard")
 
-# 3. ASVs by group in Meiofauna
-cat("\nMeiofauna ASVs by group:\n")
-asvs_per_group <- table(species$Best.group)
-print(asvs_per_group)
-
-# 4. Meiofauna richness by sample
-min_asvs <- min(ecol$richness)
-max_asvs <- max(ecol$richness)
-mean_asvs <- round(mean(ecol$richness), 1)
-
-cat("\nMinimum ASVs per sample:", min_asvs, "\n")
-cat("Maximum ASVs per sample:", max_asvs, "\n")
-cat("Mean ASVs per sample:", mean_asvs, "\n")
-
-# Identify specific samples with min/max ASVs
-sample_min <- ecol$sample_ID[which.min(ecol$richness)]
-sample_max <- ecol$sample_ID[which.max(ecol$richness)]
-
-cat("\nThe sample with the fewest ASVs is:", sample_min, "\n")
-cat("The sample with the most ASVs is:", sample_max, "\n")
+# 3. Mantel test
+mantel(d1, d2)
 
 
-################## ALPHA DIVERSITY #############################
+
+################## ALPHA DIVERSITY #############################---------------------
 ############# A. Taxonomic Alpha Diversity #####################
 
-#### MEIOFAUNA MODEL
-model <- glmmTMB(richness ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol, family = poisson)
+#### Meiofauna (Alpha Tax)-----------------------------------------
+model <- glmmTMB(richness_meio_rar ~ scale(depth) + Mesh + habitat_norm + (1 | ID), data = ecol, family = poisson)
 
 # Check model assumptions
 performance::check_overdispersion(model)
@@ -223,7 +190,6 @@ emmeans(model, pairwise ~ habitat_norm, type="response")
 prediction_mesh <- ggpredict(model, terms = "Mesh", bias_correction = TRUE)
 
 ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "grey70", linetype = "dashed", linewidth = 0.5) +
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
                 width = 0.1, linewidth = 0.8, color = "#444444") +
   geom_point(size = 4, color = "#999999") + 
@@ -243,7 +209,6 @@ ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
 prediction_habitat <- ggpredict(model, terms = "habitat_norm", bias_correction = TRUE)
 
 ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "grey70", linetype = "dashed", linewidth = 0.5) +
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
                 width = 0.1, linewidth = 0.8, color = "#444444") +
   geom_point(size = 4, color = "#999999") + 
@@ -259,71 +224,22 @@ ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
     axis.line = element_line(color = "black")
   )
 
-## Tables with Alpha Taxonomic Results
 
-# 0. Extract basic model info (N and Groups)
-df_info <- data.frame(
-  Parameter = c("Total Observations (N)", "Number of Groups (ID)"),
-  Value = c(nobs(model), summary(model)$ngrps$ID)
-)
+#### Copepoda (Alpha Tax) ------------------------------------------------
 
-# 1. Extract model coefficients
-df_summary <- as.data.frame(summary(model)$coefficients$cond)
-df_summary$Term <- rownames(df_summary) 
-rownames(df_summary) <- NULL
-df_summary <- df_summary[, c("Term", "Estimate", "Std. Error", "z value", "Pr(>|z|)")]
-
-# 2. Extract performance metrics
-df_r2 <- as.data.frame(performance::r2(model))
-df_icc <- as.data.frame(performance::icc(model))
-df_aic <- data.frame(AIC = AIC(model), BIC = BIC(model))
-df_performance <- cbind(df_aic, df_r2, df_icc)
-
-# 3. Extract Type II ANOVA results
-anova_res <- car::Anova(model)
-df_anova <- as.data.frame(anova_res)
-df_anova$Term <- rownames(df_anova)
-rownames(df_anova) <- NULL
-df_anova <- df_anova[, c("Term", "Chisq", "Df", "Pr(>Chisq)")]
-
-# 4. Extract post-hoc pairwise comparisons
-em_mesh <- emmeans(model, pairwise ~ Mesh, type="response")
-em_hab <- emmeans(model, pairwise ~ habitat_norm, type="response")
-
-df_pair_mesh <- as.data.frame(em_mesh$contrasts)
-df_pair_hab <- as.data.frame(em_hab$contrasts)
-
-# 5. Compile into a list and export to Excel
-excel_results_list <- list(
-  "0_Model_Info" = df_info,          
-  "1_Model_Summary" = df_summary,
-  "2_Performance_Metrics" = df_performance,
-  "3_ANOVA_TypeII" = df_anova,
-  "4_Pairwise_Mesh" = df_pair_mesh,
-  "5_Pairwise_Habitat" = df_pair_hab
-)
-
-write_xlsx(excel_results_list, path = "Meiofauna_alpha_tax.xlsx")
-
-
-#### Copepoda (Alpha Tax) ------------------------------------------------------
-
-# Filter community matrix
-cop_asvs <- species %>%
+# Identify ASVs
+cop_asvs <- species_meio %>%
   filter(Best.group == "Copepoda") %>%
   pull(ASVid)
 
-comm_cop <- comm[, colnames(comm) %in% cop_asvs]
+# Subset meiofauna presence/absence matrix (drop = FALSE keeps it as a matrix)
+comm_cop <- comm_meio_pa[, colnames(comm_meio_pa) %in% cop_asvs, drop = FALSE]
 
-# Calculate richness
-if(is.null(dim(comm_cop))) {
-  ecol$richness_cop <- (comm_cop > 0) * 1
-} else {
-  ecol$richness_cop <- rowSums(comm_cop > 0)
-}
+# Calculate richness per sample
+ecol$richness_cop <- rowSums(comm_cop > 0)
 
 # Model
-model_cop <- glmmTMB(richness_cop ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol, family = poisson) 
+model_cop <- glmmTMB(richness_cop ~ scale(depth) + Mesh + habitat_norm + (1 | ID), data = ecol, family = nbinom2) 
 
 # Check assumptions
 performance::check_overdispersion(model_cop)
@@ -340,7 +256,6 @@ emmeans(model_cop, pairwise ~ habitat_norm, type="response")
 # Predicted Plot: Mesh
 prediction_mesh <- ggpredict(model_cop, terms = "Mesh")
 ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "#012334", linetype = "dashed", linewidth = 0.5) +
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
   geom_point(size = 4, color = "#012334", alpha=0.8) + 
   labs(x = "Mesh size (µm)", y = "Predicted ASV Richness", title = "Copepoda: Model-Adjusted Effects") +
@@ -357,19 +272,24 @@ ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
   theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
 
 
+
 #### Nematoda (Alpha Tax) ------------------------------------------------------
 
-nem_asvs <- species %>% filter(Best.group == "Nematoda") %>% pull(ASVid)
-comm_nem <- comm[, colnames(comm) %in% nem_asvs]
+# Identify ASVs
+nem_asvs <- species_meio %>%
+  filter(Best.group == "Nematoda") %>%
+  pull(ASVid)
 
-if(is.null(dim(comm_nem))) {
-  ecol$richness_nem <- (comm_nem > 0) * 1
-} else {
-  ecol$richness_nem <- rowSums(comm_nem > 0)
-}
+# Subset meiofauna presence/absence matrix (drop = FALSE keeps it as a matrix)
+comm_nem <- comm_meio_pa[, colnames(comm_meio_pa) %in% nem_asvs, drop = FALSE]
 
-model_nem <- glmmTMB(richness_nem ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol, family = poisson) 
+# Calculate richness per sample
+ecol$richness_nem <- rowSums(comm_nem > 0)
 
+# model
+model_nem <- glmmTMB(richness_nem ~ scale(depth) + Mesh + habitat_norm +  (1 | ID), data = ecol, family = poisson) 
+
+# check the model
 performance::check_overdispersion(model_nem)
 pdf("check_model_nem_output.pdf", width = 10, height = 7)
 performance::check_model(model_nem)
@@ -382,7 +302,6 @@ emmeans(model_nem, pairwise ~ habitat_norm, type="response")
 
 prediction_mesh <- ggpredict(model_nem, terms = "Mesh")
 ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "#15adf8", linetype = "dashed", linewidth = 0.5) +
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
   geom_point(size = 4, color = "#15adf8", alpha=0.8) + 
   labs(x = "Mesh size (µm)", y = "Predicted ASV Richness", title = "Nematoda: Model-Adjusted Effects") +
@@ -400,17 +319,21 @@ ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
 
 #### Platyhelminthes (Alpha Tax) -----------------------------------------------
 
-plat_asvs <- species %>% filter(Best.group == "Platyhelminthes") %>% pull(ASVid)
-comm_plat <- comm[, colnames(comm) %in% plat_asvs]
+# Identify ASVs
+plat_asvs <- species_meio %>%
+  filter(Best.group == "Platyhelminthes") %>%
+  pull(ASVid)
 
-if(is.null(dim(comm_plat))) {
-  ecol$richness_plat <- (comm_plat > 0) * 1
-} else {
-  ecol$richness_plat <- rowSums(comm_plat > 0)
-}
+# Subset meiofauna presence/absence matrix (drop = FALSE keeps it as a matrix)
+comm_plat <- comm_meio_pa[, colnames(comm_meio_pa) %in% plat_asvs, drop = FALSE]
 
-model_plat <- glmmTMB(richness_plat ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol, family = poisson) 
+# Calculate richness per sample
+ecol$richness_plat <- rowSums(comm_plat > 0)
 
+# Model
+model_plat <- glmmTMB(richness_plat ~ scale(depth) + Mesh + habitat_norm +  (1 | ID), data = ecol, family = nbinom2) 
+
+# Check model
 performance::check_overdispersion(model_plat)
 pdf("check_model_plat_output.pdf", width = 10, height = 7)
 performance::check_model(model_plat)
@@ -423,7 +346,6 @@ emmeans(model_plat, pairwise ~ habitat_norm, type="response")
 
 prediction_mesh <- ggpredict(model_plat, terms = "Mesh")
 ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "#d47000", linetype = "dashed", linewidth = 0.5) +
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
   geom_point(size = 4, color = "#d47000", alpha=0.8) + 
   labs(x = "Mesh size (µm)", y = "Predicted ASV Richness", title = "Platyhelminthes: Model-Adjusted Effects") +
@@ -439,173 +361,6 @@ ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
   theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
 
 
-#### Ostracoda (Alpha Tax) -----------------------------------------------------
-
-os_asvs <- species %>% filter(Best.group == "Ostracoda") %>% pull(ASVid)
-comm_os <- comm[, colnames(comm) %in% os_asvs]
-
-if(is.null(dim(comm_os))) {
-  ecol$richness_os <- (comm_os > 0) * 1
-} else {
-  ecol$richness_os <- rowSums(comm_os > 0)
-}
-
-model_os <- glmmTMB(richness_os ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol, family = poisson) 
-
-performance::check_overdispersion(model_os)
-pdf("check_model_os_output.pdf", width = 10, height = 7)
-performance::check_model(model_os)
-dev.off()
-
-summary(model_os)
-car::Anova(model_os)
-emmeans(model_os, pairwise ~ Mesh, type="response")
-emmeans(model_os, pairwise ~ habitat_norm, type="response")
-
-prediction_mesh <- ggpredict(model_os, terms = "Mesh")
-ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "#046493", linetype = "dashed", linewidth = 0.5) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "#046493", alpha=0.8) + 
-  labs(x = "Mesh size (µm)", y = "Predicted ASV Richness", title = "Ostracoda: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-prediction_habitat <- ggpredict(model_os, terms = "habitat_norm")
-ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "#046493") + 
-  labs(x = "Type of habitat", y = "Predicted ASV Richness", title = "Ostracoda: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-
-#### Annelida (Alpha Tax) ------------------------------------------------------
-
-ann_asvs <- species %>% filter(Best.group == "Annelida") %>% pull(ASVid)
-comm_ann <- comm[, colnames(comm) %in% ann_asvs]
-
-if(is.null(dim(comm_ann))) {
-  ecol$richness_ann <- (comm_ann > 0) * 1
-} else {
-  ecol$richness_ann <- rowSums(comm_ann > 0)
-}
-
-model_ann <- glmmTMB(richness_ann ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol,  family = poisson) 
-
-performance::check_overdispersion(model_ann)
-pdf("check_model_ann_output.pdf", width = 10, height = 7)
-performance::check_model(model_ann)
-dev.off()
-
-summary(model_ann)
-car::Anova(model_ann)
-emmeans(model_ann, pairwise ~ Mesh, type="response")
-emmeans(model_ann, pairwise ~ habitat_norm, type="response")
-
-prediction_mesh <- ggpredict(model_ann, terms = "Mesh")
-ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "#723c00", linetype = "dashed", linewidth = 0.5) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "#723c00", alpha=0.8) + 
-  labs(x = "Mesh size (µm)", y = "Predicted ASV Richness", title = "Annelida: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-prediction_habitat <- ggpredict(model_ann, terms = "habitat_norm")
-ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "#723c00", linetype = "dashed", linewidth = 0.5) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "#723c00") + 
-  labs(x = "Type of habitat", y = "Predicted ASV Richness", title = "Annelida: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-
-#### Gastrotricha (Alpha Tax) --------------------------------------------------
-
-gas_asvs <- species %>% filter(Best.group == "Gastrotricha") %>% pull(ASVid)
-comm_gas <- comm[, colnames(comm) %in% gas_asvs]
-
-if(is.null(dim(comm_gas))) {
-  ecol$richness_gas <- (comm_gas > 0) * 1
-} else {
-  ecol$richness_gas <- rowSums(comm_gas > 0)
-}
-
-# Note: Uses nbinom2 instead of poisson
-model_gas <- glmmTMB(richness_gas ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol,  family = nbinom2) 
-
-performance::check_overdispersion(model_gas)
-pdf("check_model_gas_output.pdf", width = 10, height = 7)
-performance::check_model(model_gas)
-dev.off()
-
-summary(model_gas)
-car::Anova(model_gas)
-emmeans(model_gas, pairwise ~ Mesh, type="response")
-emmeans(model_gas, pairwise ~ habitat_norm, type="response")
-
-prediction_mesh <- ggpredict(model_gas, terms = "Mesh")
-ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "#fb8500", alpha=0.8) + 
-  labs(x = "Mesh size (µm)", y = "Predicted ASV Richness", title = "Gastrotricha: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-prediction_habitat <- ggpredict(model_gas, terms = "habitat_norm")
-ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "#fb8500", linetype = "dashed", linewidth = 0.5) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "#fb8500") + 
-  labs(x = "Type of habitat", y = "Predicted ASV Richness", title = "Gastrotricha: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-
-#### Xenacoelomorpha (Alpha Tax) -----------------------------------------------
-
-xen_asvs <- species %>% filter(Best.group == "Xenacoelomorpha") %>% pull(ASVid)
-comm_xen <- comm[, colnames(comm) %in% xen_asvs]
-
-if(is.null(dim(comm_xen))) {
-  ecol$richness_xen <- (comm_xen > 0) * 1
-} else {
-  ecol$richness_xen <- rowSums(comm_xen > 0)
-}
-
-model_xen <- glmmTMB(richness_xen ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), data = ecol, family = poisson) 
-
-performance::check_overdispersion(model_xen)
-pdf("check_model_xen_output.pdf", width = 10, height = 7)
-performance::check_model(model_xen)
-dev.off()
-
-summary(model_xen)
-car::Anova(model_xen)
-emmeans(model_xen, pairwise ~ Mesh, type="response")
-emmeans(model_xen, pairwise ~ habitat_norm, type="response")
-
-
-prediction_mesh <- ggpredict(model_xen, terms = "Mesh")
-ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "grey", alpha=0.8) + 
-  labs(x = "Mesh size (µm)", y = "Predicted ASV Richness", title = "Xenacoelomorpha: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-prediction_habitat <- ggpredict(model_xen, terms = "habitat_norm")
-ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
-  geom_line(color = "grey", linetype = "dashed", linewidth = 0.5) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
-  geom_point(size = 4, color = "grey") + 
-  labs(x = "Type of habitat", y = "Predicted ASV Richness", title = "Xenacoelomorpha: Model-Adjusted Effects") +
-  theme_minimal(base_size = 14) +
-  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
-
-
 
 ## Table with results alpha tax by group ---------------------------------------
 
@@ -616,11 +371,7 @@ model_list <- list(
   "meio" = model,
   "cop"  = model_cop,
   "nem"  = model_nem,
-  "plat" = model_plat,
-  "os"   = model_os,
-  "ann"  = model_ann,
-  "gas"  = model_gas,
-  "xen"  = model_xen
+  "plat" = model_plat
 )
 
 # 2. Create a LOOP that will iterate through each model one by one
@@ -643,10 +394,46 @@ for (taxon_name in names(model_list)) {
   rownames(df_summary) <- NULL
   df_summary <- df_summary[, c("Term", "Estimate", "Std. Error", "z value", "Pr(>|z|)")]
   
-  # 2. Extract performance metrics
-  df_r2 <- as.data.frame(performance::r2(current_model))
-  df_icc <- as.data.frame(performance::icc(current_model))
+  # 2. Extract performance metrics (with safety fallback for singular models)
+  
+  # A) R2 Calculation
+  r2_calc <- suppressWarnings(tryCatch(performance::r2(current_model), error = function(e) NULL))
+  
+  # Check safely if R2 returned NA, NULL, or an atomic vector
+  if (is.null(r2_calc) || !is.list(r2_calc) || is.null(r2_calc$R2_marginal) || is.na(r2_calc$R2_marginal[1])) {
+    
+    # Fallback: Fit fixed-effects GLM to extract Deviance Explained (D2)
+    form_fixed <- update(formula(current_model), . ~ . - (1 | ID))
+    glm_fit    <- tryCatch(
+      glm(form_fixed, data = ecol, family = family(current_model)$family),
+      error = function(e) NULL
+    )
+    
+    if (!is.null(glm_fit)) {
+      d2_val <- 1 - (glm_fit$deviance / glm_fit$null.deviance)
+      df_r2  <- data.frame(R2_conditional = d2_val, R2_marginal = d2_val)
+    } else {
+      df_r2  <- data.frame(R2_conditional = NA, R2_marginal = NA)
+    }
+    
+  } else {
+    df_r2 <- as.data.frame(r2_calc)
+  }
+  
+  # B) ICC Calculation
+  icc_calc <- suppressWarnings(tryCatch(performance::icc(current_model), error = function(e) NULL))
+  
+  # Check safely for ICC as well
+  if (is.null(icc_calc) || !is.list(icc_calc) || is.null(icc_calc$ICC_adjusted) || is.na(icc_calc$ICC_adjusted[1])) {
+    df_icc <- data.frame(ICC = 0) # If random effect variance is zero, ICC is 0
+  } else {
+    df_icc <- as.data.frame(icc_calc)
+  }
+  
+  # C) AIC/BIC
   df_aic <- data.frame(AIC = AIC(current_model), BIC = BIC(current_model))
+  
+  # Combine metrics
   df_performance <- cbind(df_aic, df_r2, df_icc)
   
   # 3. Extract Type II ANOVA results
@@ -678,34 +465,33 @@ for (taxon_name in names(model_list)) {
 }
 
 
-############# B. Phylogenetic alpha diversity ####################################
 
-# Clean and test sequences
-species$sequence <- trimws(as.character(species$sequence))
+############# B. Phylogenetic Alpha Diversity ####################################---------------------------------------
 
-species <- species[
-  !is.na(species$sequence) &
-    nzchar(species$sequence) &
-    species$sequence != "NA",
+## Meiofauna (Alpha Phyl)----------------------------------------
+# Clean and test sequences (using the Meiofauna subset)
+species_meio$sequence <- trimws(as.character(species_meio$sequence))
+
+species_meio <- species_meio[
+  !is.na(species_meio$sequence) &
+    nzchar(species_meio$sequence) &
+    species_meio$sequence != "NA",
 ]
 
-any(is.na(species$sequence))
-any(species$sequence == "")
-any(grepl("^\\s+$", species$sequence))
-any(species$sequence == "NA")
+# Verify sequence cleaning (should all return FALSE)
+any(is.na(species_meio$sequence))
+any(species_meio$sequence == "")
+any(grepl("^\\s+$", species_meio$sequence))
+any(species_meio$sequence == "NA")
 
-# Assuming 'species' has ASVid and sequence columns
-seqs <- DNAStringSet(species$sequence)
-names(seqs) <- species$ASVid
+# Export and read FASTA file
+seqs <- DNAStringSet(species_meio$sequence)
+names(seqs) <- species_meio$ASVid
 writeXStringSet(seqs, filepath = "Sequences_meioAntarctica18S.fasta", format = "fasta")
 
-# Read FASTA file from the specified path
 seqs <- readDNAStringSet("Sequences_meioAntarctica18S.fasta")
 
-# Check the first lines
-head(seqs)
-
-## Tree building
+# Tree building
 alignment <- AlignSeqs(seqs)
 
 # Convert alignment to a phyDat object
@@ -715,29 +501,34 @@ phy_data <- phyDat(as.matrix(alignment), type = "DNA")
 dist_matrix <- dist.ml(phy_data)  # Distance matrix
 tree <- NJ(dist_matrix)           # Tree with Neighbor-Joining
 
-comm <- (comm > 0) * 1
+# Calculate Phylogenetic Diversity (using rarefied meiofauna matrix)
+# Filter matrix to only include ASVs present in the tree
+comm_meio_pa_phylo <- comm_meio_pa[, colnames(comm_meio_pa) %in% tree$tip.label, drop = FALSE]
 
-pd_sample <- BAT::alpha(comm, tree = tree)
+# Calculate alpha phylogenetic diversity (BAT package)
+pd_sample <- BAT::alpha(comm_meio_pa_phylo, tree = tree)
 pd_sample <- as.data.frame(pd_sample)
 colnames(pd_sample) <- "phylo.diver"
 pd_sample$sample_ID <- rownames(pd_sample)
 
-stations <- merge(ecol, pd_sample, by = "sample_ID", all.x = TRUE)
-stations$phylo.diver[is.na(stations$phylo.diver)] <- 0
+# Merge PD results directly into the main 'ecol' dataframe
+ecol <- merge(ecol, pd_sample, by = "sample_ID", all.x = TRUE)
+
+# Replace NAs with 0 (samples with 0 Meiofauna ASVs have 0 Phylogenetic Diversity)
+ecol$phylo.diver[is.na(ecol$phylo.diver)] <- 0
+
+# Transform negative values into 0
+ecol$phylo.diver[ecol$phylo.diver < 0] <- 0
 
 
-## Model
-stations$Mesh <- as.factor(stations$Mesh)
-
-mod.phylo <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), 
-                     data = stations, family = tweedie(link="log"))
+# Model
+mod.phylo <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + (1 | ID), ziformula = ~ 1,
+  data   = ecol, family = tweedie(link = "log"))
 
 ## Check the model
 performance::check_overdispersion(mod.phylo)
 performance::check_collinearity(mod.phylo)
-plot(mod.phylo)
-
-# pdf("C:/Users/DEEPGAMING/OneDrive - Universidad Complutense de Madrid (UCM)/Mi unidad/Proyectos/Emilia-Romagna/check_model_2.pdf", width = 10, height = 7) 
+# pdf("C:/Users/Lab 22/OneDrive - Universidad Complutense de Madrid (UCM)/Mi unidad/Proyectos/Emilia-Romagna/check_model_2.pdf", width = 10, height = 7) 
 performance::check_model(mod.phylo)
 # dev.off()
 
@@ -753,20 +544,13 @@ emmeans(mod.phylo, pairwise ~ habitat_norm, type="response")
 ## Box-plot (predicted)
 
 # Mesh size
-# 1. Extract predictions
+
 prediction_mesh <- ggpredict(mod.phylo, terms = "Mesh", bias_correction = TRUE)
 
-# 2. "Predicted Values" plot, publication style
 ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  
-  # Confidence intervals ("error bars")
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
                 width = 0.1, linewidth = 0.8, color = "#444444") +
-  
-  # Predicted points (Grey for Meiofauna)
   geom_point(size = 4, color = "#999999") + 
-  
-  # Labels and formatting
   labs(
     x = "Mesh size (µm)",
     y = "Predicted Phylogenetic Richness",
@@ -784,22 +568,13 @@ ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
 
 
 # Habitat
-# 1. Extract predictions
 prediction_habitat <- ggpredict(mod.phylo, terms = "habitat_norm", bias_correction = TRUE)
 
-# 2. "Predicted Values" plot, publication style
 ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
-  # Add a soft line to connect the trends (optional)
-  geom_line(color = "grey70", linetype = "dashed", linewidth = 0.5) +
   
-  # Confidence intervals ("error bars")
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
                 width = 0.1, linewidth = 0.8, color = "#444444") +
-  
-  # Predicted points (Grey for Meiofauna)
   geom_point(size = 4, color = "#999999") + 
-  
-  # Labels and formatting
   labs(
     x = "Type of habitat",
     y = "Predicted Phylogenetic Richness",
@@ -807,7 +582,6 @@ ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
     subtitle = ""
   ) +
   
-  # Visual cleanup
   theme_minimal(base_size = 14) +
   theme(
     panel.grid.minor = element_blank(),
@@ -816,103 +590,52 @@ ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
   )
 
 
-## Tables with results alpha phyl 
+## Copepoda (Alpha Phyl) ------------------------------------------------
 
-# 0. Extract basic info from mod.phylo (N and Groups)
-# nobs() gets total observations and summary()$ngrps gets random factor levels
-df_info <- data.frame(
-  Parameter = c("Total Observations (N)", "Number of Groups (ID)"),
-  Value = c(nobs(mod.phylo), summary(mod.phylo)$ngrps$ID)
-)
+# Filter sequences for Copepoda
+species_cop <- species_meio %>% 
+  dplyr::filter(Best.group == "Copepoda")
 
-# 1. Extract model coefficients (Estimates, SE, z-values, p-values)
-df_summary <- as.data.frame(summary(mod.phylo)$coefficients$cond)
-df_summary$Term <- rownames(df_summary) # Move row names to a column
-rownames(df_summary) <- NULL
-df_summary <- df_summary[, c("Term", "Estimate", "Std. Error", "z value", "Pr(>|z|)")]
-
-# 2. Extract performance metrics (Explicitly forcing R2, ICC, and AIC)
-df_r2 <- as.data.frame(performance::r2(mod.phylo))
-df_icc <- as.data.frame(performance::icc(mod.phylo))
-df_aic <- data.frame(AIC = AIC(mod.phylo), BIC = BIC(mod.phylo))
-
-# Combine into a single row (ensuring no duplicate columns)
-df_performance <- cbind(df_aic, df_r2, df_icc)
-
-# 3. Extract Type II ANOVA results
-anova_res <- car::Anova(mod.phylo)
-df_anova <- as.data.frame(anova_res)
-df_anova$Term <- rownames(df_anova)
-rownames(df_anova) <- NULL
-df_anova <- df_anova[, c("Term", "Chisq", "Df", "Pr(>Chisq)")]
-
-# 4. Extract post-hoc (Pairwise comparisons)
-em_mesh <- emmeans(mod.phylo, pairwise ~ Mesh, type="response")
-em_hab <- emmeans(mod.phylo, pairwise ~ habitat_norm, type="response")
-
-df_pair_mesh <- as.data.frame(em_mesh$contrasts)
-df_pair_hab <- as.data.frame(em_hab$contrasts)
-
-# 5. Join everything into a list and export to a single Excel with multiple tabs
-excel_results_list <- list(
-  "0_mod.phylo_Info" = df_info,         
-  "1_mod.phylo_Summary" = df_summary,
-  "2_Performance_Metrics" = df_performance,
-  "3_ANOVA_TypeII" = df_anova,
-  "4_Pairwise_Mesh" = df_pair_mesh,
-  "5_Pairwise_Habitat" = df_pair_hab
-)
-
-# Export file to working directory
-write_xlsx(excel_results_list, path = "Meiofauna_alpha_phyl.xlsx")
-
-
-## Phylogenetic richness by taxa
-
-## Copepoda (alpha phyl) -------------------------------------------------------
-
-species_cop <- species %>% dplyr::filter(Best.group == "Copepoda")
-
-seqs <- DNAStringSet(species_cop$sequence)
-names(seqs) <- species_cop$ASVid
-writeXStringSet(seqs, filepath = "Sequences_copAntarctica18S.fasta", format = "fasta")
+seqs_cop <- DNAStringSet(species_cop$sequence)
+names(seqs_cop) <- species_cop$ASVid
+writeXStringSet(seqs_cop, filepath = "Sequences_copAntarctica18S.fasta", format = "fasta")
 
 # Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_cop <- NJ(dist_matrix)
+alignment_cop <- AlignSeqs(seqs_cop)
+phy_data_cop  <- phyDat(as.matrix(alignment_cop), type = "DNA")
+dist_matrix_cop <- dist.ml(phy_data_cop)
+tree_cop      <- NJ(dist_matrix_cop)
 
-## Community Matrix
+# Community Matrix (Presence/Absence)
 asvs_cop <- species_cop$ASVid
-comm_cop_subset <- comm[, colnames(comm) %in% asvs_cop]
+# Use drop = FALSE to ensure it stays a matrix even if there is only 1 ASV
+comm_cop_binary <- comm_meio_pa[, colnames(comm_meio_pa) %in% asvs_cop, drop = FALSE]
 
-# Presence/Absence
-comm_cop_binary <- as.matrix((comm_cop_subset > 0) * 1)
-
-## Phylogenetic richness (PD)
+# Phylogenetic richness (PD)
 pd_cop_res <- BAT::alpha(comm_cop_binary, tree = tree_cop)
-pd_cop <- data.frame(
-  sample_ID = rownames(pd_cop_res),
-  phylo.diver = as.numeric(pd_cop_res[,1])
-)
+pd_cop <- as.data.frame(pd_cop_res)
 
-## Merge with ecol 
-stations_cop <- merge(ecol, pd_cop, by = "sample_ID", all.x = TRUE)
+# Name it specifically for Copepoda to avoid overwriting total meiofauna PD
+colnames(pd_cop) <- "phylo_diver_cop"
+pd_cop$sample_ID <- rownames(pd_cop)
 
-# Substitute NAs with 0
-stations_cop$phylo.diver[is.na(stations_cop$phylo.diver)] <- 0
+# Merge with the main 'ecol' dataframe
+ecol <- merge(ecol, pd_cop, by = "sample_ID", all.x = TRUE)
 
-## Phylogenetic richness model
-stations_cop$Mesh <- as.factor(stations_cop$Mesh)
+# Substitute NAs with 0 (samples without Copepoda have PD = 0)
+ecol$phylo_diver_cop[is.na(ecol$phylo_diver_cop)] <- 0
 
-mod.phylo_cop <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), 
-                         data = stations_cop, family = tweedie(link="log"))
+# Transform negative values into 0
+ecol$phylo_diver_cop[ecol$phylo_diver_cop < 0] <- 0
+
+# Phylogenetic richness model
+# Note: Using ziformula = ~ 1 handles excess structural zeros perfectly
+mod.phylo_cop <- glmmTMB(phylo_diver_cop ~ scale(depth) + Mesh + habitat_norm + (1 | ID), 
+  data      = ecol, family    = tweedie(link = "log"))
 
 ## Check the model
 performance::check_overdispersion(mod.phylo_cop)
 performance::check_collinearity(mod.phylo_cop)
-
 # pdf(...)
 performance::check_model(mod.phylo_cop)
 # dev.off()
@@ -926,45 +649,58 @@ emmeans(mod.phylo_cop, pairwise ~ Mesh, type="response")
 emmeans(mod.phylo_cop, pairwise ~ habitat_norm, type="response")
 
 
-## Nematoda (alpha phyl) -------------------------------------------------------
+# Predicted Plot: Mesh
+prediction_mesh <- ggpredict(mod.phylo_cop, terms = "Mesh")
+ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1, linewidth = 0.8, color = "#444444") +
+  geom_point(size = 4, color = "#012334", alpha=0.8) + 
+  labs(x = "Mesh size (µm)", y = "Predicted Phylogenetic Richness", title = "Copepoda: Model-Adjusted Effects") +
+  theme_minimal(base_size = 14) +
+  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"), axis.line = element_line(color = "black"))
 
-species_nem <- species %>% dplyr::filter(Best.group == "Nematoda")
 
-seqs <- DNAStringSet(species_nem$sequence)
-names(seqs) <- species_nem$ASVid
-writeXStringSet(seqs, filepath = "Sequences_nemAntarctica18S.fasta", format = "fasta")
+
+## Nematoda (Alpha Phyl) -------------------------------------------------------
+
+# Filter sequences for Nematoda
+species_nem <- species_meio %>% 
+  dplyr::filter(Best.group == "Nematoda")
+
+seqs_nem <- DNAStringSet(species_nem$sequence)
+names(seqs_nem) <- species_nem$ASVid
+writeXStringSet(seqs_nem, filepath = "Sequences_nemAntarctica18S.fasta", format = "fasta")
 
 # Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_nem <- NJ(dist_matrix)
+alignment_nem <- AlignSeqs(seqs_nem)
+phy_data_nem  <- phyDat(as.matrix(alignment_nem), type = "DNA")
+dist_matrix_nem <- dist.ml(phy_data_nem)
+tree_nem      <- NJ(dist_matrix_nem)
 
-## Community Matrix
+# Community Matrix (Presence/Absence)
 asvs_nem <- species_nem$ASVid
-comm_nem_subset <- comm[, colnames(comm) %in% asvs_nem]
+# Use drop = FALSE to ensure it stays a matrix even if there is only 1 ASV
+comm_nem_binary <- comm_meio_pa[, colnames(comm_meio_pa) %in% asvs_nem, drop = FALSE]
 
-# Presence/Absence
-comm_nem_binary <- as.matrix((comm_nem_subset > 0) * 1)
-
-## Phylogenetic richness (PD)
+# Phylogenetic richness (PD)
 pd_nem_res <- BAT::alpha(comm_nem_binary, tree = tree_nem)
-pd_nem <- data.frame(
-  sample_ID = rownames(pd_nem_res),
-  phylo.diver = as.numeric(pd_nem_res[,1])
-)
+pd_nem <- as.data.frame(pd_nem_res)
 
-## Merge with ecol 
-stations_nem <- merge(ecol, pd_nem, by = "sample_ID", all.x = TRUE)
+# Name it specifically for Nematoda to avoid overwriting total meiofauna PD
+colnames(pd_nem) <- "phylo_diver_nem"
+pd_nem$sample_ID <- rownames(pd_nem)
 
-# Substitute NAs with 0
-stations_nem$phylo.diver[is.na(stations_nem$phylo.diver)] <- 0
+# Merge with the main 'ecol' dataframe
+ecol <- merge(ecol, pd_nem, by = "sample_ID", all.x = TRUE)
 
-## Phylogenetic richness model
-stations_nem$Mesh <- as.factor(stations_nem$Mesh)
+# Substitute NAs with 0 (samples without Nematoda have PD = 0)
+ecol$phylo_diver_nem[is.na(ecol$phylo_diver_nem)] <- 0
 
-mod.phylo_nem <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), 
-                         data = stations_nem, family = tweedie(link="log"))
+# Transform negative values into 0
+ecol$phylo_diver_nem[ecol$phylo_diver_nem < 0] <- 0
+
+# Phylogenetic richness model
+mod.phylo_nem <- glmmTMB(phylo_diver_nem ~ scale(depth) + Mesh + habitat_norm + (1 | ID), 
+                         data      = ecol, family    = tweedie(link = "log"))
 
 ## Check the model
 performance::check_overdispersion(mod.phylo_nem)
@@ -972,6 +708,7 @@ performance::check_collinearity(mod.phylo_nem)
 
 # pdf(...)
 performance::check_model(mod.phylo_nem)
+
 # dev.off()
 
 ## Summary and post-hoc
@@ -1015,46 +752,48 @@ ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
   )
 
 
-## Platyhelminthes (alpha phyl) ------------------------------------------------
+## Platyhelminthes (Alpha Phyl) ------------------------------------------------
 
-species_plat <- species %>% dplyr::filter(Best.group == "Platyhelminthes")
+# Filter sequences for Platyhelminthes
+species_plat <- species_meio %>% 
+  dplyr::filter(Best.group == "Platyhelminthes")
 
-seqs <- DNAStringSet(species_plat$sequence)
-names(seqs) <- species_plat$ASVid
-writeXStringSet(seqs, filepath = "Sequences_platAntarctica18S.fasta", format = "fasta")
+seqs_plat <- DNAStringSet(species_plat$sequence)
+names(seqs_plat) <- species_plat$ASVid
+writeXStringSet(seqs_plat, filepath = "Sequences_platAntarctica18S.fasta", format = "fasta")
 
 # Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_plat <- NJ(dist_matrix)
+alignment_plat <- AlignSeqs(seqs_plat)
+phy_data_plat  <- phyDat(as.matrix(alignment_plat), type = "DNA")
+dist_matrix_plat <- dist.ml(phy_data_plat)
+tree_plat      <- NJ(dist_matrix_plat)
 
-## Community Matrix
+# Community Matrix (Presence/Absence)
 asvs_plat <- species_plat$ASVid
-comm_plat_subset <- comm[, colnames(comm) %in% asvs_plat]
+# Use drop = FALSE to ensure it stays a matrix even if there is only 1 ASV
+comm_plat_binary <- comm_meio_pa[, colnames(comm_meio_pa) %in% asvs_plat, drop = FALSE]
 
-# Presence/Absence
-comm_plat_binary <- as.matrix((comm_plat_subset > 0) * 1)
-
-## Phylogenetic richness (PD)
+# Phylogenetic richness (PD)
 pd_plat_res <- BAT::alpha(comm_plat_binary, tree = tree_plat)
-pd_plat <- data.frame(
-  sample_ID = rownames(pd_plat_res),
-  phylo.diver = as.numeric(pd_plat_res[,1])
-)
+pd_plat <- as.data.frame(pd_plat_res)
 
-## Merge with ecol 
-stations_plat <- merge(ecol, pd_plat, by = "sample_ID", all.x = TRUE)
+# Name it specifically for Platyhelminthes to avoid overwriting total meiofauna PD
+colnames(pd_plat) <- "phylo_diver_plat"
+pd_plat$sample_ID <- rownames(pd_plat)
 
-# Substitute NAs with 0
-stations_plat$phylo.diver[is.na(stations_plat$phylo.diver)] <- 0
+# Merge with the main 'ecol' dataframe
+ecol <- merge(ecol, pd_plat, by = "sample_ID", all.x = TRUE)
 
-## Phylogenetic richness model
-stations_plat$Mesh <- as.factor(stations_plat$Mesh)
+# Substitute NAs with 0 (samples without Platyhelminthes have PD = 0)
+ecol$phylo_diver_plat[is.na(ecol$phylo_diver_plat)] <- 0
 
-mod.phylo_plat <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), 
-                          data = stations_plat, family = tweedie(link="log"))
+# Transform negative values into 0
+ecol$phylo_diver_plat[ecol$phylo_diver_plat < 0] <- 0
 
+# Phylogenetic richness model
+# Note: Using ziformula = ~ 1 handles excess structural zeros perfectly
+mod.phylo_plat <- glmmTMB(phylo_diver_plat ~ scale(depth) + Mesh + habitat_norm + (1 | ID), 
+                        data      = ecol, family    = tweedie(link = "log"))
 ## Check the model
 performance::check_overdispersion(mod.phylo_plat)
 performance::check_collinearity(mod.phylo_plat)
@@ -1102,288 +841,77 @@ ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
   )
 
 
-## Ostracoda (alpha phyl) ------------------------------------------------------
-
-species_os <- species %>% dplyr::filter(Best.group == "Ostracoda")
-
-seqs <- DNAStringSet(species_os$sequence)
-names(seqs) <- species_os$ASVid
-writeXStringSet(seqs, filepath = "Sequences_osAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_os <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_os <- species_os$ASVid
-comm_os_subset <- comm[, colnames(comm) %in% asvs_os]
-
-# Presence/Absence
-comm_os_binary <- as.matrix((comm_os_subset > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_os_res <- BAT::alpha(comm_os_binary, tree = tree_os)
-pd_os <- data.frame(
-  sample_ID = rownames(pd_os_res),
-  phylo.diver = as.numeric(pd_os_res[,1])
-)
-
-## Merge with ecol 
-stations_os <- merge(ecol, pd_os, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_os$phylo.diver[is.na(stations_os$phylo.diver)] <- 0
-
-## Phylogenetic richness model
-stations_os$Mesh <- as.factor(stations_os$Mesh)
-
-mod.phylo_os <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), 
-                        data = stations_os, family = tweedie(link="log"))
-
-## Check the model
-performance::check_overdispersion(mod.phylo_os)
-performance::check_collinearity(mod.phylo_os)
-
-# pdf(...)
-performance::check_model(mod.phylo_os)
-# dev.off()
-
-## Summary and post-hoc
-car::Anova(mod.phylo_os)
-summary(mod.phylo_os)
-
-## Post-hoc
-emmeans(mod.phylo_os, pairwise ~ Mesh, type="response")
-emmeans(mod.phylo_os, pairwise ~ habitat_norm, type="response")
-
-# Habitat
-# 1. Extract predictions (using mod.phylo_os)
-prediction_habitat <- ggpredict(mod.phylo_os, terms = "habitat_norm")
-
-# 2. "Predicted Values" plot, publication style
-ggplot(prediction_habitat, aes(x = x, y = predicted, group = 1)) +
-  
-  # Confidence intervals ("error bars")
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
-                width = 0.1, linewidth = 0.8, color = "#444444") +
-  
-  # Predicted points (Dark blue for Ostracoda)
-  geom_point(size = 4, color = "#046493") + 
-  
-  # Labels and formatting
-  labs(
-    x = "Type of habitat",
-    y = "Predicted Phylogenetic Richness",
-    title = "Ostracoda: Model-Adjusted Effects",
-    subtitle = ""
-  ) +
-  
-  # Visual cleanup
-  theme_minimal(base_size = 14) +
-  theme(
-    panel.grid.minor = element_blank(),
-    plot.title = element_text(face = "bold"),
-    axis.line = element_line(color = "black")
-  )
-
-
-## Annelida (alpha phyl) -------------------------------------------------------
-
-species_ann <- species %>% dplyr::filter(Best.group == "Annelida")
-
-seqs <- DNAStringSet(species_ann$sequence)
-names(seqs) <- species_ann$ASVid
-writeXStringSet(seqs, filepath = "Sequences_annAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_ann <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_ann <- species_ann$ASVid
-comm_ann_subset <- comm[, colnames(comm) %in% asvs_ann]
-
-# Presence/Absence
-comm_ann_binary <- as.matrix((comm_ann_subset > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_ann_res <- BAT::alpha(comm_ann_binary, tree = tree_ann)
-pd_ann <- data.frame(
-  sample_ID = rownames(pd_ann_res),
-  phylo.diver = as.numeric(pd_ann_res[,1])
-)
-
-## Merge with ecol 
-stations_ann <- merge(ecol, pd_ann, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_ann$phylo.diver[is.na(stations_ann$phylo.diver)] <- 0
-
-## Phylogenetic richness model
-stations_ann$Mesh <- as.factor(stations_ann$Mesh)
-
-mod.phylo_ann <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), 
-                         data = stations_ann, family = tweedie(link="log"))
-
-## Check the model
-performance::check_overdispersion(mod.phylo_ann)
-performance::check_collinearity(mod.phylo_ann)
-
-# pdf(...)
-performance::check_model(mod.phylo_ann)
-# dev.off()
-
-## Summary and post-hoc
-car::Anova(mod.phylo_ann)
-summary(mod.phylo_ann)
-
-## Post-hoc
-emmeans(mod.phylo_ann, pairwise ~ Mesh, type="response")
-emmeans(mod.phylo_ann, pairwise ~ habitat_norm, type="response")
-
-
-## Gastrotricha (alpha phyl) ---------------------------------------------------
-
-species_gas <- species %>% dplyr::filter(Best.group == "Gastrotricha")
-
-seqs <- DNAStringSet(species_gas$sequence)
-names(seqs) <- species_gas$ASVid
-writeXStringSet(seqs, filepath = "Sequences_gasAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_gas <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_gas <- species_gas$ASVid
-comm_gas_subset <- comm[, colnames(comm) %in% asvs_gas]
-
-# Presence/Absence
-comm_gas_binary <- as.matrix((comm_gas_subset > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_gas_res <- BAT::alpha(comm_gas_binary, tree = tree_gas)
-pd_gas <- data.frame(
-  sample_ID = rownames(pd_gas_res),
-  phylo.diver = as.numeric(pd_gas_res[,1])
-)
-
-## Merge with ecol 
-stations_gas <- merge(ecol, pd_gas, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_gas$phylo.diver[is.na(stations_gas$phylo.diver)] <- 0
-
-## Phylogenetic richness model
-stations_gas$Mesh <- as.factor(stations_gas$Mesh)
-
-mod.phylo_gas <- glmmTMB(phylo.diver ~ scale(depth) + Mesh + habitat_norm + offset(log(total_reads)) + (1 | ID), 
-                         data = stations_gas, family = tweedie(link="log"))
-
-## Check the model
-performance::check_overdispersion(mod.phylo_gas)
-performance::check_collinearity(mod.phylo_gas)
-
-# pdf(...)
-performance::check_model(mod.phylo_gas)
-# dev.off()
-
-## Summary and post-hoc
-car::Anova(mod.phylo_gas)
-summary(mod.phylo_gas)
-
-## Post-hoc
-emmeans(mod.phylo_gas, pairwise ~ Mesh, type="response")
-emmeans(mod.phylo_gas, pairwise ~ habitat_norm, type="response")
-
-## Box plot (predicted)
-# Mesh
-# 1. Extract predictions
-prediction_mesh <- ggpredict(mod.phylo_gas, terms = "Mesh")
-
-# 2. "Predicted Values" plot, publication style
-ggplot(prediction_mesh, aes(x = x, y = predicted, group = 1)) +
-  
-  # Confidence intervals ("error bars")
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), 
-                width = 0.1, linewidth = 0.8, color = "#444444") +
-  
-  # Predicted points (Light orange for Gastrotricha)
-  geom_point(size = 4, color = "#fb8500", alpha=0.8) + 
-  
-  # Labels and formatting
-  labs(
-    x = "Mesh size (µm)",
-    y = "Predicted Phylogenetic Richness",
-    title = "Gastrotricha: Model-Adjusted Effects",
-    subtitle = ""
-  ) +
-  
-  # Visual cleanup
-  theme_minimal(base_size = 14) +
-  theme(
-    panel.grid.minor = element_blank(),
-    plot.title = element_text(face = "bold"),
-    axis.line = element_line(color = "black")
-  )
-
-
 ## Table with results alpha phyl by group --------------------------------------------
 
-# 1. Put all phylogeny models in a list (excluding mites)
-phylo_model_list <- list(
+# 1. Put all models in a list with their names
+# The name on the left (in quotes) will be used to name the Excel file
+model_list <- list(
+  "meio" = mod.phylo,
   "cop"  = mod.phylo_cop,
   "nem"  = mod.phylo_nem,
-  "plat" = mod.phylo_plat,
-  "os"   = mod.phylo_os,
-  "gas"  = mod.phylo_gas
+  "plat" = mod.phylo_plat
 )
 
-# 2. Create a fail-safe LOOP for the phylogenetic models
-for (taxon_name in names(phylo_model_list)) {
+# 2. Create a LOOP that will iterate through each model one by one
+for (taxon_name in names(model_list)) {
   
-  current_model <- phylo_model_list[[taxon_name]]
-  cat("Processing phylogenetic model for:", taxon_name, "...\n")
+  # Extract the current model for this loop iteration
+  current_model <- model_list[[taxon_name]]
   
-  # 0. Extract basic info (Protected against models without variance in ID)
-  groups_ID <- summary(current_model)$ngrps$ID
-  if(is.null(groups_ID)) groups_ID <- 0 
+  cat("Processing model for:", taxon_name, "...\n")
   
+  # 0. Extract basic info
   df_info <- data.frame(
     Parameter = c("Total Observations (N)", "Number of Groups (ID)"),
-    Value = c(nobs(current_model), groups_ID)
+    Value = c(nobs(current_model), summary(current_model)$ngrps$ID)
   )
   
-  # 1. Extract model coefficients
+  # 1. Extract coefficients
   df_summary <- as.data.frame(summary(current_model)$coefficients$cond)
   df_summary$Term <- rownames(df_summary) 
   rownames(df_summary) <- NULL
   df_summary <- df_summary[, c("Term", "Estimate", "Std. Error", "z value", "Pr(>|z|)")]
   
-  # 2. Extract performance metrics using tryCatch as a failsafe
+  # 2. Extract performance metrics (with safety fallback for singular models)
+  
+  # A) R2 Calculation
+  r2_calc <- suppressWarnings(tryCatch(performance::r2(current_model), error = function(e) NULL))
+  
+  # Check safely if R2 returned NA, NULL, or an atomic vector
+  if (is.null(r2_calc) || !is.list(r2_calc) || is.null(r2_calc$R2_marginal) || is.na(r2_calc$R2_marginal[1])) {
+    
+    # Fallback: Fit fixed-effects GLM to extract Deviance Explained (D2)
+    form_fixed <- update(formula(current_model), . ~ . - (1 | ID))
+    glm_fit    <- tryCatch(
+      glm(form_fixed, data = ecol, family = family(current_model)$family),
+      error = function(e) NULL
+    )
+    
+    if (!is.null(glm_fit)) {
+      d2_val <- 1 - (glm_fit$deviance / glm_fit$null.deviance)
+      df_r2  <- data.frame(R2_conditional = d2_val, R2_marginal = d2_val)
+    } else {
+      df_r2  <- data.frame(R2_conditional = NA, R2_marginal = NA)
+    }
+    
+  } else {
+    df_r2 <- as.data.frame(r2_calc)
+  }
+  
+  # B) ICC Calculation
+  icc_calc <- suppressWarnings(tryCatch(performance::icc(current_model), error = function(e) NULL))
+  
+  # Check safely for ICC as well
+  if (is.null(icc_calc) || !is.list(icc_calc) || is.null(icc_calc$ICC_adjusted) || is.na(icc_calc$ICC_adjusted[1])) {
+    df_icc <- data.frame(ICC = 0) # If random effect variance is zero, ICC is 0
+  } else {
+    df_icc <- as.data.frame(icc_calc)
+  }
+  
+  # C) AIC/BIC
   df_aic <- data.frame(AIC = AIC(current_model), BIC = BIC(current_model))
   
-  # Try to extract R2 (sometimes fails in tweedie if random variance is 0)
-  df_r2 <- tryCatch({
-    as.data.frame(performance::r2(current_model))
-  }, error = function(e) {
-    data.frame(R2_conditional = NA, R2_marginal = NA, Note = "Math error in R2 (Tweedie)")
-  })
-  
-  # Try to extract ICC
-  df_icc <- tryCatch({
-    as.data.frame(performance::icc(current_model))
-  }, error = function(e) {
-    data.frame(ICC = NA)
-  })
-  
-  # Merge everything into a single table
+  # Combine metrics
   df_performance <- cbind(df_aic, df_r2, df_icc)
   
   # 3. Extract Type II ANOVA results
@@ -1393,19 +921,13 @@ for (taxon_name in names(phylo_model_list)) {
   rownames(df_anova) <- NULL
   df_anova <- df_anova[, c("Term", "Chisq", "Df", "Pr(>Chisq)")]
   
-  # 4. Extract post-hoc (Pairwise)
-  # Use tryCatch here too in case any model fails during contrasts
-  df_pair_mesh <- tryCatch({
-    em_mesh <- emmeans(current_model, pairwise ~ Mesh, type="response")
-    as.data.frame(em_mesh$contrasts)
-  }, error = function(e) data.frame(Note = "Error in pairwise for Mesh"))
+  # 4. Extract post-hoc comparisons
+  em_mesh <- emmeans(current_model, pairwise ~ Mesh, type="response")
+  em_hab <- emmeans(current_model, pairwise ~ habitat_norm, type="response")
+  df_pair_mesh <- as.data.frame(em_mesh$contrasts)
+  df_pair_hab <- as.data.frame(em_hab$contrasts)
   
-  df_pair_hab <- tryCatch({
-    em_hab <- emmeans(current_model, pairwise ~ habitat_norm, type="response")
-    as.data.frame(em_hab$contrasts)
-  }, error = function(e) data.frame(Note = "Error in pairwise for Habitat"))
-  
-  # 5. Combine everything into a list of tabs for Excel
+  # 5. Join everything into a list of tabs
   excel_results_list <- list(
     "0_Model_Info" = df_info,
     "1_Model_Summary" = df_summary,
@@ -1415,69 +937,39 @@ for (taxon_name in names(phylo_model_list)) {
     "5_Pairwise_Habitat" = df_pair_hab
   )
   
-  # 6. Create the filename dynamically (Note: 'phyl' added to the name)
+  # 6. Create file name dynamically and export
   file_name <- paste0("Meiofauna_alpha_phyl_", taxon_name, ".xlsx")
-  
-  # Export to Excel
   write_xlsx(excel_results_list, path = file_name)
 }
 
 
+
 ################### BETA DIVERSITY #############################################
 
-## Helper Function for Exporting Results
-## Defined once here to avoid repeating it in every taxon block
+### Filtration: eliminate ASVs that appear only in one sample
+asv_occupancy <- colSums(comm_meio_pa)
+comm_meio_beta <- comm_meio_pa[, asv_occupancy > 1, drop = FALSE]
 
+# Delete empty samples
+valid_samples_meio <- rowSums(comm_meio_beta) > 0
+comm_meio_beta <- comm_meio_beta[valid_samples_meio, , drop = FALSE]
 
-clean_adonis_table <- function(adonis_model, table_title) {
-  
-  # 1. Convert to dataframe and extract row names
-  df <- as.data.frame(adonis_model)
-  df$Variable <- rownames(df)
-  
-  # 2. Manual renaming (Bulletproof approach)
-  # Look for the "Pr(>F)" column and rename it to "P_value"
-  names(df)[names(df) == "Pr(>F)"] <- "P_value"
-  
-  # Look for the "F" column and rename it to "F_Model" 
-  # (Avoids R interpreting it as FALSE)
-  names(df)[names(df) == "F"] <- "F_Model"
-  
-  # 3. Selection and rounding
-  # Ensure we only take columns that actually exist
-  final_cols <- c("Variable", "Df", "R2", "F_Model", "P_value")
-  
-  # Filter only the columns present in the dataframe
-  existing_cols <- intersect(final_cols, names(df))
-  df_clean <- df[, existing_cols]
-  
-  # Round numeric columns
-  df_clean <- df_clean %>%
-    mutate(across(where(is.numeric), \(x) round(x, 3)))
-  
-  # 4. Create the flextable
-  ft <- flextable(df_clean) %>%
-    set_caption(caption = table_title) %>%
-    autofit() %>%
-    bold(part = "header") 
-  
-  return(ft)
-}
+# Sincronize metadata
+ecol_meio_beta <- ecol[valid_samples_meio, ]
+stopifnot(all(rownames(comm_meio_beta) == ecol_meio_beta$sample_ID))
 
 
 ############## A. Taxonomic beta diversity ---------------------------------------
 
-### Meiofauna community (beta tax) ---------------------------------------------
+## Meiofauna (Beta Tax) ---------------------------------------------
 
-beta_diversity <- BAT::beta(comm, func = "jaccard")  
+beta_diversity <- BAT::beta(comm_meio_beta, func = "jaccard")  
 
-str(beta_diversity)
-
-ecol$Mesh <- as.factor(ecol$Mesh)
+ecol_meio_beta$Mesh <- as.factor(ecol_meio_beta$Mesh)
 
 ## PERMANOVA
-adonis_meio <- adonis2(beta_diversity$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                       data = ecol, strata = ecol$ID, by = "margin")
+adonis_meio <- adonis2(beta_diversity$Btotal ~ scale(depth) + Mesh + habitat_norm, 
+                       data = ecol_meio_beta, strata = ecol_meio_beta$ID, by = "margin")
 print(adonis_meio)
 
 # Turnover and nestedness proportions
@@ -1493,1407 +985,313 @@ per_nestedness <- (mean_nestedness / mean_total) * 100
 print(paste("Turnover represents:", round(per_turnover, 2), "%"))
 print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
 
-## Tables for results
-table1 <- clean_adonis_table(adonis_meio, "Table 1: Adonis Beta Total - Meiofauna")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Meio_Tax.docx"
-)
-
-# Estimates for "Mesh" and "Habitat"
-pairwise.adonis2(comm ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm ~ habitat_norm, data = ecol, method = "jaccard")
-
-# Check collinearity (requires adonis model, make sure 'adonis' was defined previously if using car::vif)
-# car::vif(adonis_meio)
 
 
-### Community composition by taxa 
 
-## Copepoda (beta tax) ---------------------------------------------------------
+## Copepoda (Beta Tax) ---------------------------------------------------------
 
-cop_asvs <- species %>%
+cop_asvs <- species_meio %>%
   filter(Best.group == "Copepoda") %>%
   pull(ASVid)
 
-comm_cop <- comm[, colnames(comm) %in% cop_asvs]
+comm_cop <- comm_meio_beta[, colnames(comm_meio_beta) %in% cop_asvs, drop = FALSE]
 
-# Copepoda richness
-if(is.null(dim(comm_cop))) {
-  ecol$richness_cop <- (comm_cop > 0) * 1
-} else {
-  ecol$richness_cop <- rowSums(comm_cop > 0)
-}
+# Sincronize samples
+valid_samples_cop <- rowSums(comm_cop) > 0
+comm_cop <- comm_cop[valid_samples_cop, , drop = FALSE]
+ecol_cop <- ecol_meio_beta[valid_samples_cop, ]
 
-# Calculate beta diversity (Jaccard)
-beta_diversity_cop <- beta(comm_cop, func = "jaccard")  
-str(beta_diversity_cop)
+stopifnot(all(rownames(comm_cop) == ecol_cop$sample_ID))
+
+# Calculate diversity
+
+beta_diversity_cop <- BAT::beta(comm_cop, func = "jaccard")  
 
 ## PERMANOVA
-adonis_cop <- adonis2(beta_diversity_cop$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                      data = ecol, strata = ecol$ID, by = "margin")
+ecol_cop$Mesh <- as.factor(ecol_cop$Mesh)
+
+adonis_cop <- adonis2(beta_diversity_cop$Btotal ~ scale(depth) + Mesh + habitat_norm, 
+                      data = ecol_cop, strata = ecol_cop$ID, by = "margin")
 print(adonis_cop)
 
 # Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_cop$Btotal)
-mean_turnover <- mean(beta_diversity_cop$Brepl)
-mean_nestedness <- mean(beta_diversity_cop$Brich)
+mean_total_cop <- mean(beta_diversity_cop$Btotal, na.rm = TRUE)
+mean_turnover_cop <- mean(beta_diversity_cop$Brepl, na.rm = TRUE)
+mean_nestedness_cop <- mean(beta_diversity_cop$Brich, na.rm = TRUE)
 
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
+per_turnover_cop <- (mean_turnover_cop / mean_total_cop) * 100
+per_nestedness_cop <- (mean_nestedness_cop / mean_total_cop) * 100
 
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_cop, "Table 1: Adonis Beta Total - Copepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Cop_Tax.docx"
-)
-
-pairwise.adonis2(comm_cop ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm_cop ~ habitat_norm, data = ecol, method = "jaccard")
+print(paste("Copepoda - Turnover represents:", round(per_turnover_cop, 2), "%"))
+print(paste("Copepoda - Nestedness represents:", round(per_nestedness_cop, 2), "%"))
 
 
-## Nematoda (beta tax) ---------------------------------------------------------
+## Nematoda (Beta Tax) ---------------------------------------------------------
 
-nem_asvs <- species %>%
+nem_asvs <- species_meio %>%
   filter(Best.group == "Nematoda") %>%
   pull(ASVid)
 
-comm_nem <- comm[, colnames(comm) %in% nem_asvs]
+comm_nem <- comm_meio_beta[, colnames(comm_meio_beta) %in% nem_asvs, drop = FALSE]
 
-# Nematoda richness
-if(is.null(dim(comm_nem))) {
-  ecol$richness_nem <- (comm_nem > 0) * 1
-} else {
-  ecol$richness_nem <- rowSums(comm_nem > 0)
-}
+# Sincronize samples
+valid_samples_nem <- rowSums(comm_nem) > 0
+comm_nem <- comm_nem[valid_samples_nem, , drop = FALSE]
+ecol_nem <- ecol_meio_beta[valid_samples_nem, ]
 
-# Calculate beta diversity (Jaccard)
-beta_diversity_nem <- beta(comm_nem, func = "jaccard")  
-str(beta_diversity_nem)
+stopifnot(all(rownames(comm_nem) == ecol_nem$sample_ID))
+
+# Calculate diversity
+
+beta_diversity_nem <- BAT::beta(comm_nem, func = "jaccard")  
 
 ## PERMANOVA
-adonis_nem <- adonis2(beta_diversity_nem$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                      data = ecol, strata = ecol$ID, by = "margin")
+ecol_nem$Mesh <- as.factor(ecol_nem$Mesh)
+
+adonis_nem <- adonis2(beta_diversity_nem$Btotal ~ scale(depth) + Mesh + habitat_norm, 
+                      data = ecol_nem, strata = ecol_nem$ID, by = "margin")
 print(adonis_nem)
 
 # Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_nem$Btotal)
-mean_turnover <- mean(beta_diversity_nem$Brepl)
-mean_nestedness <- mean(beta_diversity_nem$Brich)
+mean_total_nem <- mean(beta_diversity_nem$Btotal, na.rm = TRUE)
+mean_turnover_nem <- mean(beta_diversity_nem$Brepl, na.rm = TRUE)
+mean_nestedness_nem <- mean(beta_diversity_nem$Brich, na.rm = TRUE)
 
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
+per_turnover_nem <- (mean_turnover_nem / mean_total_nem) * 100
+per_nestedness_nem <- (mean_nestedness_nem / mean_total_nem) * 100
 
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_nem, "Table 1: Adonis Beta Total - Nematoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Nem_Tax.docx"
-)
-
-pairwise.adonis2(comm_nem ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm_nem ~ habitat_norm, data = ecol, method = "jaccard")
+print(paste("Nematoda - Turnover represents:", round(per_turnover_nem, 2), "%"))
+print(paste("Nematoda - Nestedness represents:", round(per_nestedness_nem, 2), "%"))
 
 
-## Platyhelminthes (beta tax) --------------------------------------------------
+## Tables with results beta tax----------------------------------------------
 
-plat_asvs <- species %>%
-  filter(Best.group == "Platyhelminthes") %>%
-  pull(ASVid)
-
-comm_plat <- comm[, colnames(comm) %in% plat_asvs]
-
-# Platyhelminthes richness
-if(is.null(dim(comm_plat))) {
-  ecol$richness_plat <- (comm_plat > 0) * 1
-} else {
-  ecol$richness_plat <- rowSums(comm_plat > 0)
+# function
+clean_adonis_df <- function(adonis_res) {
+  df <- as.data.frame(adonis_res)
+  df$Term <- rownames(df)
+  rownames(df) <- NULL
+  
+  # Select and reorder
+  cols_present <- colnames(df)
+  target_cols <- c("Term", "Df", "SumOfSqs", "R2", "F", "Pr(>F)")
+  cols_to_keep <- intersect(target_cols, cols_present)
+  df <- df[, cols_to_keep]
+  
+  # Rename columns
+  colnames(df) <- gsub("SumOfSqs", "Sum_of_Sqs", colnames(df))
+  colnames(df) <- gsub("Pr\\(>F\\)", "p_value", colnames(df))
+  
+  # 4 decimals
+  num_cols <- sapply(df, is.numeric)
+  df[num_cols] <- lapply(df[num_cols], function(x) round(x, 4))
+  
+  return(df)
 }
 
-# Calculate beta diversity (Jaccard)
-beta_diversity_plat <- beta(comm_plat, func = "jaccard")  
-str(beta_diversity_plat)
-
-## PERMANOVA
-adonis_plat <- adonis2(beta_diversity_plat$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                       data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_plat)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_plat$Btotal)
-mean_turnover <- mean(beta_diversity_plat$Brepl)
-mean_nestedness <- mean(beta_diversity_plat$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_plat, "Table 1: Adonis Beta Total - Platyhelminthes")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Plat_Tax.docx"
+# 1. C
+excel_beta_list <- list(
+  "Total_Meiofauna" = clean_adonis_df(adonis_meio),
+  "Copepoda"        = clean_adonis_df(adonis_cop),
+  "Nematoda"        = clean_adonis_df(adonis_nem)
 )
 
-pairwise.adonis2(comm_plat ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm_plat ~ habitat_norm, data = ecol, method = "jaccard")
-
-
-## Ostracoda (beta tax) --------------------------------------------------------
-
-os_asvs <- species %>%
-  filter(Best.group == "Ostracoda") %>%
-  pull(ASVid)
-
-comm_os <- comm[, colnames(comm) %in% os_asvs]
-
-# Ostracoda richness
-if(is.null(dim(comm_os))) {
-  ecol$richness_os <- (comm_os > 0) * 1
-} else {
-  ecol$richness_os <- rowSums(comm_os > 0)
-}
-
-# Calculate beta diversity (Jaccard)
-beta_diversity_os <- beta(comm_os, func = "jaccard")  
-str(beta_diversity_os)
-
-## PERMANOVA
-adonis_os <- adonis2(beta_diversity_os$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                     data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_os)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_os$Btotal)
-mean_turnover <- mean(beta_diversity_os$Brepl)
-mean_nestedness <- mean(beta_diversity_os$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_os, "Table 1: Adonis Beta Total - Ostracoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Os_Tax.docx"
-)
-
-pairwise.adonis2(comm_os ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm_os ~ habitat_norm, data = ecol, method = "jaccard")
-
-
-## Annelida (beta tax) ---------------------------------------------------------
-
-ann_asvs <- species %>%
-  filter(Best.group == "Annelida") %>%
-  pull(ASVid)
-
-comm_ann <- comm[, colnames(comm) %in% ann_asvs]
-
-# Annelida richness
-if(is.null(dim(comm_ann))) {
-  ecol$richness_ann <- (comm_ann > 0) * 1
-} else {
-  ecol$richness_ann <- rowSums(comm_ann > 0)
-}
-
-# Calculate beta diversity (Jaccard)
-beta_diversity_ann <- beta(comm_ann, func = "jaccard")  
-str(beta_diversity_ann)
-
-## PERMANOVA
-adonis_ann <- adonis2(beta_diversity_ann$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                      data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_ann)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_ann$Btotal)
-mean_turnover <- mean(beta_diversity_ann$Brepl)
-mean_nestedness <- mean(beta_diversity_ann$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_ann, "Table 1: Adonis Beta Total - Annelida")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Ann_Tax.docx"
-)
-
-
-## Gastrotricha (beta tax) -----------------------------------------------------
-
-gas_asvs <- species %>%
-  filter(Best.group == "Gastrotricha") %>%
-  pull(ASVid)
-
-comm_gas <- comm[, colnames(comm) %in% gas_asvs]
-
-# Gastrotricha richness
-if(is.null(dim(comm_gas))) {
-  ecol$richness_gas <- (comm_gas > 0) * 1
-} else {
-  ecol$richness_gas <- rowSums(comm_gas > 0)
-}
-
-# Calculate beta diversity (Jaccard)
-beta_diversity_gas <- beta(comm_gas, func = "jaccard")  
-str(beta_diversity_gas)
-
-## PERMANOVA
-adonis_gas <- adonis2(beta_diversity_gas$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                      data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_gas)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_gas$Btotal)
-mean_turnover <- mean(beta_diversity_gas$Brepl)
-mean_nestedness <- mean(beta_diversity_gas$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_gas, "Table 1: Adonis Beta Total - Gastrotricha")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Gas_Tax.docx"
-)
-
-pairwise.adonis2(comm_gas ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm_gas ~ habitat_norm, data = ecol, method = "jaccard")
-
-
-## Xenacoelomorpha (beta tax) --------------------------------------------------
-
-xen_asvs <- species %>%
-  filter(Best.group == "Xenacoelomorpha") %>%
-  pull(ASVid)
-
-comm_xen <- comm[, colnames(comm) %in% xen_asvs]
-
-# Xenacoelomorpha richness
-if(is.null(dim(comm_xen))) {
-  ecol$richness_xen <- (comm_xen > 0) * 1
-} else {
-  ecol$richness_xen <- rowSums(comm_xen > 0)
-}
-
-# Calculate beta diversity (Jaccard)
-beta_diversity_xen <- beta(comm_xen, func = "jaccard")  
-str(beta_diversity_xen)
-
-## PERMANOVA
-adonis_xen <- adonis2(beta_diversity_xen$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                      data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_xen)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_xen$Btotal)
-mean_turnover <- mean(beta_diversity_xen$Brepl)
-mean_nestedness <- mean(beta_diversity_xen$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_xen, "Table 1: Adonis Beta Total - Xenacoelomorpha")
-# NOTE: The turnover and nestedness models were not calculated in the code above. 
-# Uncomment the following lines only if you calculate 'adonis_xen_turnover' and 'adonis_xen_nestedness'
-# table2 <- clean_adonis_table(adonis_xen_turnover, "Table 2: Adonis Turnover")
-# table3 <- clean_adonis_table(adonis_xen_nestedness, "Table 3: Adonis Nestedness")
-
-# Save table
-save_as_docx(
-  table1, 
-  # table2, 
-  # table3, 
-  path = "Results_Adonis_Xen_Tax.docx"
-)
-
-pairwise.adonis2(comm_xen ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm_xen ~ habitat_norm, data = ecol, method = "jaccard")
-
-
-## Acari (beta tax) ------------------------------------------------------------
-
-aca_asvs <- species %>%
-  filter(Best.group == "Acari") %>%
-  pull(ASVid)
-
-comm_aca <- comm[, colnames(comm) %in% aca_asvs]
-
-# Acari richness
-if(is.null(dim(comm_aca))) {
-  ecol$richness_aca <- (comm_aca > 0) * 1
-} else {
-  ecol$richness_aca <- rowSums(comm_aca > 0)
-}
-
-# Calculate beta diversity (Jaccard)
-beta_diversity_aca <- beta(comm_aca, func = "jaccard")  
-str(beta_diversity_aca)
-
-## PERMANOVA
-adonis_aca <- adonis2(beta_diversity_aca$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                      data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_aca)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta_diversity_aca$Btotal)
-mean_turnover <- mean(beta_diversity_aca$Brepl)
-mean_nestedness <- mean(beta_diversity_aca$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_aca, "Table 1: Adonis Beta Total - Acari")
-# NOTE: Same as above, uncomment if turnover/nestedness models are calculated.
-# table2 <- clean_adonis_table(adonis_aca_turnover, "Table 2: Adonis Turnover")
-# table3 <- clean_adonis_table(adonis_aca_nestedness, "Table 3: Adonis Nestedness")
-
-# Save table
-save_as_docx(
-  table1, 
-  # table2, 
-  # table3, 
-  path = "Results_Adonis_Aca_Tax.docx"
-)
-
-pairwise.adonis2(comm_aca ~ Mesh, data = ecol, method = "jaccard")
-pairwise.adonis2(comm_aca ~ habitat_norm, data = ecol, method = "jaccard")
+# 2. Export to an excel file
+write_xlsx(excel_beta_list, path = "Results_Adonis_Beta_Tax_ALL.xlsx")
 
 
 ############# B. Phylogenetic beta diversity #####################################
 
-## Meiofauna (beta phyl) -------------------------------------------------------
-
-library(Biostrings)
-library(DECIPHER)
-library(phangorn)
-
-# Assuming species has 'ASVid' and 'sequence'
-seqs <- DNAStringSet(species$sequence)
-names(seqs) <- species$ASVid
-writeXStringSet(seqs, filepath = "Sequences_meioAntarctica18S.fasta", format = "fasta")
-
-# Read FASTA file from the specified path
-seqs <- readDNAStringSet("Sequences_meioAntarctica18S.fasta")
-
-# Inspect the first lines
-head(seqs)
-
-## Tree building
-alignment <- AlignSeqs(seqs)
-
-# Convert alignment to a phyDat object
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-
-# Make phylogenetic tree with Neighbor-Joining
-dist_matrix <- dist.ml(phy_data)  # Distance matrix
-tree <- NJ(dist_matrix)           # Tree with Neighbor-Joining
-
-comm <- (comm > 0) * 1
-
-# Phylogenetic Richness (Alpha) included in this section
-pd_sample <- BAT::alpha(comm, tree = tree)
-pd_sample <- as.data.frame(pd_sample)
-colnames(pd_sample) <- "phylo.diver"
-pd_sample$sample_ID <- rownames(pd_sample)
-
-stations <- merge(ecol, pd_sample, by = "sample_ID", all.x = TRUE)
-stations$phylo.diver[is.na(stations$phylo.diver)] <- 0
-
-stations$Mesh <- as.factor(stations$Mesh)
-
-## Beta diversity (Phylogenetic)
-beta.phylo <- BAT::beta(comm, tree = tree)
-
-## PERMANOVA
-adonis_meio_phyl <- adonis2(beta.phylo$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                            data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_meio_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo$Btotal)
-mean_turnover <- mean(beta.phylo$Brepl)
-mean_nestedness <- mean(beta.phylo$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_meio_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - Meiofauna")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Meio_Phyl.docx"
-)
-
-
-## Copepoda (beta phyl) --------------------------------------------------------
-
-species_cop <- species %>% dplyr::filter(Best.group == "Copepoda")
-
-seqs <- DNAStringSet(species_cop$sequence)
-names(seqs) <- species_cop$ASVid
-writeXStringSet(seqs, filepath = "Sequences_copAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_cop <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_cop <- species_cop$ASVid
-comm_cop <- comm[, colnames(comm) %in% asvs_cop]
-
-# Presence/Absence
-comm_cop <- as.matrix((comm_cop > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_cop_res <- BAT::alpha(comm_cop, tree = tree_cop)
-pd_cop <- data.frame(
-  sample_ID = rownames(pd_cop_res),
-  phylo.diver = as.numeric(pd_cop_res[,1])
-)
-
-## Merge with ecol 
-stations_cop <- merge(ecol, pd_cop, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_cop$phylo.diver[is.na(stations_cop$phylo.diver)] <- 0
-
-## Beta diversity (Phylogenetic)
-beta.phylo_cop <- BAT::beta(comm_cop, tree = tree_cop)
-
-## PERMANOVA
-adonis_cop_phyl <- adonis2(beta.phylo_cop$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                           data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_cop_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo_cop$Btotal)
-mean_turnover <- mean(beta.phylo_cop$Brepl)
-mean_nestedness <- mean(beta.phylo_cop$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_cop_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - Copepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_Cop_Phyl.docx"
-)
-
-
-
-## Nematoda (beta phyl) --------------------------------------------------------
-
-species_nem <- species %>% dplyr::filter(Best.group == "Nematoda")
-
-seqs <- DNAStringSet(species_nem$sequence)
-names(seqs) <- species_nem$ASVid
-writeXStringSet(seqs, filepath = "Sequences_nemAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_nem <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_nem <- species_nem$ASVid
-comm_nem <- comm[, colnames(comm) %in% asvs_nem]
-
-# Presence/Absence
-comm_nem <- as.matrix((comm_nem > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_nem_res <- BAT::alpha(comm_nem, tree = tree_nem)
-pd_nem <- data.frame(
-  sample_ID = rownames(pd_nem_res),
-  phylo.diver = as.numeric(pd_nem_res[,1])
-)
-
-## Merge with ecol 
-stations_nem <- merge(ecol, pd_nem, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_nem$phylo.diver[is.na(stations_nem$phylo.diver)] <- 0
-
-## Beta diversity (Phylogenetic)
-beta.phylo_nem <- BAT::beta(comm_nem, tree = tree_nem)
-
-## PERMANOVA
-adonis_nem_phyl <- adonis2(beta.phylo_nem$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                           data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_nem_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo_nem$Btotal)
-mean_turnover <- mean(beta.phylo_nem$Brepl)
-mean_nestedness <- mean(beta.phylo_nem$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_nem_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - nemepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_nem_Phyl.docx"
-)
-
-
-
-## Platyhelminthes (beta phyl) --------------------------------------------------------
-
-species_plat <- species %>% dplyr::filter(Best.group == "Platyhelminthes")
-
-seqs <- DNAStringSet(species_plat$sequence)
-names(seqs) <- species_plat$ASVid
-writeXStringSet(seqs, filepath = "Sequences_platAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_plat <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_plat <- species_plat$ASVid
-comm_plat <- comm[, colnames(comm) %in% asvs_plat]
-
-# Presence/Absence
-comm_plat <- as.matrix((comm_plat > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_plat_res <- BAT::alpha(comm_plat, tree = tree_plat)
-pd_plat <- data.frame(
-  sample_ID = rownames(pd_plat_res),
-  phylo.diver = as.numeric(pd_plat_res[,1])
-)
-
-## Merge with ecol 
-stations_plat <- merge(ecol, pd_plat, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_plat$phylo.diver[is.na(stations_plat$phylo.diver)] <- 0
-
-## Beta diversity (Phylogenetic)
-beta.phylo_plat <- BAT::beta(comm_plat, tree = tree_plat)
-
-## PERMANOVA
-adonis_plat_phyl <- adonis2(beta.phylo_plat$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                           data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_plat_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo_plat$Btotal)
-mean_turnover <- mean(beta.phylo_plat$Brepl)
-mean_nestedness <- mean(beta.phylo_plat$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_plat_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - platepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_plat_Phyl.docx"
-)
-
-
-
-## Ostracoda (beta phyl) --------------------------------------------------------
-
-species_os <- species %>% dplyr::filter(Best.group == "Ostracoda")
-
-seqs <- DNAStringSet(species_os$sequence)
-names(seqs) <- species_os$ASVid
-writeXStringSet(seqs, filepath = "Sequences_osAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_os <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_os <- species_os$ASVid
-comm_os <- comm[, colnames(comm) %in% asvs_os]
-
-# Presence/Absence
-comm_os <- as.matrix((comm_os > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_os_res <- BAT::alpha(comm_os, tree = tree_os)
-pd_os <- data.frame(
-  sample_ID = rownames(pd_os_res),
-  phylo.diver = as.numeric(pd_os_res[,1])
-)
-
-## Merge with ecol 
-stations_os <- merge(ecol, pd_os, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_os$phylo.diver[is.na(stations_os$phylo.diver)] <- 0
-
-## Beta diversity (Phylogenetic)
-beta.phylo_os <- BAT::beta(comm_os, tree = tree_os)
-
-## PERMANOVA
-adonis_os_phyl <- adonis2(beta.phylo_os$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                            data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_os_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo_os$Btotal)
-mean_turnover <- mean(beta.phylo_os$Brepl)
-mean_nestedness <- mean(beta.phylo_os$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_os_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - osepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_os_Phyl.docx"
-)
-
-
-## Annelida (beta phyl) --------------------------------------------------------
-
-species_ann <- species %>% dplyr::filter(Best.group == "Annelida")
-
-seqs <- DNAStringSet(species_ann$sequence)
-names(seqs) <- species_ann$ASVid
-writeXStringSet(seqs, filepath = "Sequences_annAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_ann <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_ann <- species_ann$ASVid
-comm_ann <- comm[, colnames(comm) %in% asvs_ann]
-
-# Presence/Absence
-comm_ann <- as.matrix((comm_ann > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_ann_res <- BAT::alpha(comm_ann, tree = tree_ann)
-pd_ann <- data.frame(
-  sample_ID = rownames(pd_ann_res),
-  phylo.diver = as.numeric(pd_ann_res[,1])
-)
-
-## Merge with ecol 
-stations_ann <- merge(ecol, pd_ann, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_ann$phylo.diver[is.na(stations_ann$phylo.diver)] <- 0
-
-## Beta diversity (Phylogenetic)
-beta.phylo_ann <- BAT::beta(comm_ann, tree = tree_ann)
-
-## PERMANOVA
-adonis_ann_phyl <- adonis2(beta.phylo_ann$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                            data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_ann_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo_ann$Btotal)
-mean_turnover <- mean(beta.phylo_ann$Brepl)
-mean_nestedness <- mean(beta.phylo_ann$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_ann_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - annepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_ann_Phyl.docx"
-)
-
-
-
-## Gastrotricha (beta phyl) --------------------------------------------------------
-
-species_gas <- species %>% dplyr::filter(Best.group == "Gastrotricha")
-
-seqs <- DNAStringSet(species_gas$sequence)
-names(seqs) <- species_gas$ASVid
-writeXStringSet(seqs, filepath = "Sequences_gasAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_gas <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_gas <- species_gas$ASVid
-comm_gas <- comm[, colnames(comm) %in% asvs_gas]
-
-# Presence/Absence
-comm_gas <- as.matrix((comm_gas > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_gas_res <- BAT::alpha(comm_gas, tree = tree_gas)
-pd_gas <- data.frame(
-  sample_ID = rownames(pd_gas_res),
-  phylo.diver = as.numeric(pd_gas_res[,1])
-)
-
-## Merge with ecol 
-stations_gas <- merge(ecol, pd_gas, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_gas$phylo.diver[is.na(stations_gas$phylo.diver)] <- 0
-
-## Beta diversity (Phylogenetic)
-beta.phylo_gas <- BAT::beta(comm_gas, tree = tree_gas)
-
-## PERMANOVA
-adonis_gas_phyl <- adonis2(beta.phylo_gas$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                            data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_gas_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo_gas$Btotal)
-mean_turnover <- mean(beta.phylo_gas$Brepl)
-mean_nestedness <- mean(beta.phylo_gas$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_gas_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - gasepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_gas_Phyl.docx"
-)
-
-
-## Acari (beta phyl) --------------------------------------------------------
-
-species_aca <- species %>% dplyr::filter(Best.group == "Acari")
-
-seqs <- DNAStringSet(species_aca$sequence)
-names(seqs) <- species_aca$ASVid
-writeXStringSet(seqs, filepath = "Sequences_acaAntarctica18S.fasta", format = "fasta")
-
-# Alignment and NJ tree
-alignment <- AlignSeqs(seqs)
-phy_data <- phyDat(as.matrix(alignment), type = "DNA")
-dist_matrix <- dist.ml(phy_data)
-tree_aca <- NJ(dist_matrix)
-
-## Community Matrix
-asvs_aca <- species_aca$ASVid
-comm_aca <- comm[, colnames(comm) %in% asvs_aca]
-
-# Presence/Absence
-comm_aca <- as.matrix((comm_aca > 0) * 1)
-
-## Phylogenetic richness (PD)
-pd_aca_res <- BAT::alpha(comm_aca, tree = tree_aca)
-pd_aca <- data.frame(
-  sample_ID = rownames(pd_aca_res),
-  phylo.diver = as.numeric(pd_aca_res[,1])
-)
-
-## Merge with ecol 
-stations_aca <- merge(ecol, pd_aca, by = "sample_ID", all.x = TRUE)
-
-# Substitute NAs with 0
-stations_aca$phylo.diver[is.na(stations_aca$phylo.diver)] <- 0
-
-## Beta diversity (Phylogenetic)
-beta.phylo_aca <- BAT::beta(comm_aca, tree = tree_aca)
-
-## PERMANOVA
-adonis_aca_phyl <- adonis2(beta.phylo_aca$Btotal ~ scale(depth) + Mesh + habitat_norm + log(total_reads+1), 
-                           data = ecol, strata = ecol$ID, by = "margin")
-print(adonis_aca_phyl)
-
-# Turnover and nestedness proportions
-mean_total <- mean(beta.phylo_aca$Btotal)
-mean_turnover <- mean(beta.phylo_aca$Brepl)
-mean_nestedness <- mean(beta.phylo_aca$Brich)
-
-per_turnover <- (mean_turnover / mean_total) * 100
-per_nestedness <- (mean_nestedness / mean_total) * 100
-
-print(paste("Turnover represents:", round(per_turnover, 2), "%"))
-print(paste("Nestedness represents:", round(per_nestedness, 2), "%"))
-
-## Tables for results
-table1 <- clean_adonis_table(adonis_aca_phyl, "Table 1: Adonis Beta Total (Phylogenetic) - acaepoda")
-
-# Save table
-save_as_docx(
-  table1, 
-  path = "Results_Adonis_aca_Phyl.docx"
-)
-
-
-
-################### FIGURES #############################
-############## Figure 1: Sampling map---------------------------------
-
-## 1. Zoomed-in map (satellite)
-# Erase duplicated coordinates
-
-ecol_unique <- ecol %>%
-  distinct(longitude, latitude, .keep_all = TRUE)
-
-print(ecol_unique)
-
-register_stadiamaps(key = "e629ead7-e2f7-4cbb-9529-d204a2aaf84d")
-
-satellite_map <- get_stadiamap(
-  bbox = c(left = 163.80, bottom = -74.80, right = 164.30, top = -74.65), 
-  zoom = 10, 
-  maptype = "stamen_terrain" # Options: "terrain", "toner", "watercolor"
-)
-
-ggmap(satellite_map)
-
-ggmap(satellite_map) +
-  geom_point(data = ecol_unique, aes(x = longitude, y = latitude),
-             color = "red", size = 1.85, alpha = 0.8) +  # Sampling points
-  geom_text(data = ecol_unique, aes(x = longitude, y = latitude, label = ID),
-            color = "black", size = 2.5, vjust = -1) +
-  labs(title = "Ross Sea sampling points",
-       x = "Longitude", y = "Latitude") +
-  theme_minimal()
-
-
-
-## 2. Map of all Antarctica
-### Geographic projection
-
-# Mapa de la Antártida sin proyección especial
-antarctica <- ne_countries(scale = "medium", returnclass = "sf") %>%
-  filter(sovereignt == "Antarctica")
-
-ggplot() +
-  geom_sf(data = antarctica, fill = "white", color = "black") +
-  coord_sf(xlim = c(-180, 180), ylim = c(-90, -60)) +  # Mismo sistema que ggmap
-  theme_minimal() +
-  labs(title = "Antarctica (Geographic projection)", x = "Longitude", y = "Latitude")
-
-
-
-
-############## Figure 2: Metabarcoding papers comparison--------------------------
-
-# 1. COLORS
-# Define custom colors for the papers
-paper_colors <- c(
-  "Ref3"  = "#d4f0fe", "Ref4"  = "#15adf8", "Ref6"   = "#0697e0",
-  "Ref7"  = "#057eb9", "Ref6+7"= "#068fdc", "Ref8"   = "#046493",
-  "Ref9"  = "#012334", "Ref10" = "#ffe103", "Ref2"   = "#fbc400",
-  "Ref1"  = "#fb8500", "Ref5"  = "#723c00"
-)
-
-world_map <- map_data("world")
-
-# 2. NODE PREPARATION (ECOL) 
-ecol_raw <- read.csv("stations network.csv", sep = ";") %>%
-  mutate(
-    lat = as.numeric(gsub(",", ".", latitude)),
-    lon = as.numeric(gsub(",", ".", longitude)),
-    lat = ifelse(regional_location == "Antarctica", -abs(lat), lat),
-    studyid = as.character(studyid)
-  ) %>% 
-  filter(!is.na(lat))
-
-# Combine coordinates for Ref6 and Ref7
-coord_combined <- ecol_raw %>%
-  filter(studyid %in% c("Ref6", "Ref7")) %>%
-  summarise(studyid = "Ref6+7", lon = mean(lon), lat = mean(lat))
-
-# Create the combined ecological dataset with geometries
-ecol_comb <- ecol_raw %>%
-  filter(!studyid %in% c("Ref6", "Ref7")) %>%
-  bind_rows(coord_combined) %>%
-  st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE)
-
-# Generate nodes with a bit of jitter to prevent overlapping
-nodos_comb <- ecol_comb %>%
-  st_drop_geometry() %>%
-  select(id = studyid, lon, lat) %>%
-  distinct(id, .keep_all = TRUE) %>%
-  mutate(
-    lon_jitter = jitter(lon, amount = 2),
-    lat_jitter = jitter(lat, amount = 2)
-  )
-
-# 3. READ CLEAN EDGES TABLE 
-# Load the manually cleaned CSV and ensure 'from'/'to' are characters
-edges_base_limpia <- read.csv("edges_limpios.csv", sep = ";") %>%
-  mutate(from = as.character(from), to = as.character(to))
-
-
-# 4. MAP 1: GLOBAL 
-
-# Multiply edges directly from the clean table based on their weight
-edges_global <- edges_base_limpia %>% uncount(weight)
-
-# Create the graph object
-graph_geo_comb <- tbl_graph(nodes = nodos_comb, edges = edges_global, directed = FALSE)
-
-set.seed(42)
-plot_geo_map_comb <- ggraph(graph_geo_comb, layout = "manual", x = lon_jitter, y = lat_jitter) +
-  geom_polygon(data = world_map, aes(x = long, y = lat, group = group), fill = "#e8e8e8", color = NA) +
-  geom_edge_fan(color = "#2c3e50", width = 0.1, alpha = 0.5, spread = 1, show.legend = FALSE) +
-  geom_node_point(aes(color = id), size = 4, show.legend = FALSE) +
-  geom_node_label(aes(label = id, fill = id),
-                  repel = TRUE, size = 3.5, fontface = "bold",
-                  color = "black", alpha = 0.8, max.overlaps = Inf,
-                  show.legend = FALSE) +
-  scale_fill_manual(values = paper_colors) +
-  scale_color_manual(values = paper_colors) +
-  coord_fixed(ratio = 1.3, xlim = c(-180, 180), ylim = c(-90, 90)) +
-  theme_void() +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16, margin = margin(b=10)))
-
-plot_geo_map_comb
-
-
-# 5. MAP 2: EUROPE ZOOM 
-
-refs_interes <- c("Ref2", "Ref3", "Ref4", "Ref6+7", "Ref8", "Ref9")
-
-# Filter the clean edges table for Europe and THEN multiply by weight
-edges_eu_comb <- edges_base_limpia %>%
-  filter(from %in% refs_interes & to %in% refs_interes) %>%
-  uncount(weight)
-
-# Filter nodes for Europe with adjusted jitter
-nodos_eu_comb <- ecol_comb %>%
-  st_drop_geometry() %>%
-  select(id = studyid, lon, lat) %>%
-  distinct(id, .keep_all = TRUE) %>%
-  filter(id %in% refs_interes) %>%
-  mutate(lon_jitter = jitter(lon, amount = 0.5), lat_jitter = jitter(lat, amount = 0.5))
-
-graph_geo_eu_comb <- tbl_graph(nodes = nodos_eu_comb, edges = edges_eu_comb, directed = FALSE)
-
-set.seed(42)
-plot_eu_comb <- ggraph(graph_geo_eu_comb, layout = "manual", x = lon_jitter, y = lat_jitter) +
-  geom_polygon(data = world_map, aes(x = long, y = lat, group = group), fill = "#e8e8e8", color = NA) +
-  geom_edge_fan(color = "#2c3e50", width = 0.1, alpha = 0.5, spread = 1, show.legend = FALSE) +
-  geom_node_point(aes(color = id), size = 4, show.legend = FALSE) +
-  geom_node_label(aes(label = id, fill = id),
-                  repel = TRUE, size = 3.5, fontface = "bold",
-                  color = "black", alpha = 0.8, max.overlaps = Inf,
-                  show.legend = FALSE) +
-  scale_fill_manual(values = paper_colors) +
-  scale_color_manual(values = paper_colors) +
-  coord_fixed(ratio = 1.3, xlim = c(-2, 20), ylim = c(36, 70)) +
-  theme_void() +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16, margin = margin(b=10))) +
-  labs(title = "ASV Connectivity: North Sea and Mediterranean",
-       subtitle = "Ref6 and Ref7 combined (Individual ASV threads)")
-
-plot_eu_comb
-
-
-
-#### Shared ASVs
-
-# 1. READ METADATA FILE
-df_meta <- read.csv("ASVs_metadata100_gaps.csv", sep = ",")
-
-# 2. CLEAN AND COLLAPSE REDUNDANT ASVs
-df_meta_clean <- df_meta %>%
-  # Group by the two connected studies and the main ASV (ASVid2_1)
-  group_by(study1, study2, ASVid2_1) %>%
-  summarise(
-    # Collapse all matching secondary ASVs into a single string
-    ASVs_destino_combinados = paste(unique(ASVid2_2), collapse = " | "),
-    
-    # Count distinct ASV matches to assess redundancy
-    Numero_de_Matches = n_distinct(ASVid2_2),
-    
-    # Keep taxonomy (collapsing to handle minor variations if any)
-    Grupo_Principal = paste(unique(ASVid2_1_bestgroup), collapse = " | "),
-    Taxonomia_Detallada = paste(unique(ASVid2_1_sistergroup), collapse = " | "),
-    
-    .groups = "drop"
-  )
-
-# View the first few rows in the console
-head(df_meta_clean)
-
-# 3. SAVE THE CLEAN DATASET
-write.csv(df_meta_clean, "Metadatos_ASVs_Limpios.csv", row.names = FALSE)
-
-
-## Novelty of our paper
-
-library(dplyr)
-library(stringr)
-library(tidyr)
-
-# 1. Define filenames and dataset names
-archivos <- c(
-  "Data18S_Antarctica_v2.csv", "Data18S_Asinara_v2.csv", "Data18S_Cordier2021_v2.csv", 
-  "Data18S_Degenhardt2021_v2.csv", "Data18S_Fonseca2017.csv", "Data18S_Haenel2017_v2.csv", 
-  "Data18S_JondeliusAtherton2020.csv", "Data18S_Kapshyna2024_v2.csv", 
-  "Data18S_Mazurkiewicz2024.csv", "Data18S_Polinski2019_v2.csv"
-)
-
-nombres_datasets <- c(
-  "Antarctica", "Asinara", "Cordier2021", "Degenhardt2021", "Fonseca2017", 
-  "Haenel2017", "Jondelius2020", "Kapshyna2024", "Mazurkiewicz2024", "Polinski2019"
-)
-
-# 2. Initialize lists to store results
-lista_global <- list()
-lista_phylum <- list()
-
-# 3. UPDATED LOOP (WITH UNIQUE ASV FILTER)
-for (i in seq_along(archivos)) {
+### HELPER FUNCTION FOR CLEANING ADONIS OUTPUT FOR EXCEL
+
+clean_adonis_df <- function(adonis_res) {
+  df <- as.data.frame(adonis_res)
+  df$Term <- rownames(df)
+  rownames(df) <- NULL
   
-  datos <- read.csv(archivos[i], sep = ";", stringsAsFactors = FALSE)
+  cols_present <- colnames(df)
+  target_cols  <- c("Term", "Df", "SumOfSqs", "R2", "F", "Pr(>F)")
+  cols_to_keep <- intersect(target_cols, cols_present)
+  df           <- df[, cols_to_keep]
   
-  datos_procesados <- datos %>%
-    # Filter for correct assignments and meiofauna only
-    filter(Eval.result == "correct" & Tax.eco.meio == "TRUE") %>%
-    # KEY STEP: Keep only unique ASVs
-    distinct(ASVid, .keep_all = TRUE) %>%
-    mutate(
-      similitud = as.numeric(str_split_i(label, "\\|", 4)),
-      phylum = str_split_i(label, "\\|", 1)
-    )
+  colnames(df) <- gsub("SumOfSqs", "Sum_of_Sqs", colnames(df))
+  colnames(df) <- gsub("Pr\\(>F\\)", "p_value", colnames(df))
   
-  # Global table calculating <97% and <95% thresholds
-  res_global <- datos_procesados %>%
-    summarise(
-      Dataset = nombres_datasets[i],
-      Total_ASVs_Unicos = n(), 
-      Porc_menor_97 = mean(similitud < 97.0, na.rm = TRUE) * 100,
-      Porc_menor_95 = mean(similitud < 95.0, na.rm = TRUE) * 100
-    )
+  num_cols <- sapply(df, is.numeric)
+  df[num_cols] <- lapply(df[num_cols], function(x) round(x, 4))
   
-  lista_global[[i]] <- res_global
-  
-  # Table by phylum calculating <97% and <95% thresholds
-  res_phylum <- datos_procesados %>%
-    filter(!is.na(phylum) & phylum != "") %>%
-    group_by(phylum) %>%
-    summarise(
-      Total_ASVs_Unicos = n(),
-      Porc_menor_97 = mean(similitud < 97.0, na.rm = TRUE) * 100,
-      Porc_menor_95 = mean(similitud < 95.0, na.rm = TRUE) * 100,
-      .groups = "drop"
-    ) %>%
-    mutate(Dataset = nombres_datasets[i]) %>%
-    select(Dataset, phylum, Total_ASVs_Unicos, Porc_menor_97, Porc_menor_95)
-  
-  lista_phylum[[i]] <- res_phylum
+  return(df)
 }
 
-# 4. Combine all tables
-tabla_global_final <- bind_rows(lista_global)
-tabla_phylum_final <- bind_rows(lista_phylum)
 
-# 5. CREATE WIDE MATRICES
-tabla_ancha_97 <- tabla_phylum_final %>%
-  select(Dataset, phylum, Porc_menor_97) %>%
-  pivot_wider(names_from = Dataset, values_from = Porc_menor_97, values_fill = 0)
+### MASTER FILTER & TREE PRUNING 
 
-tabla_ancha_95 <- tabla_phylum_final %>%
-  select(Dataset, phylum, Porc_menor_95) %>%
-  pivot_wider(names_from = Dataset, values_from = Porc_menor_95, values_fill = 0)
+# A. Filter base community (ASVs in > 1 sample)
+asv_occupancy  <- colSums(comm_meio_pa)
+comm_meio_beta <- comm_meio_pa[, asv_occupancy > 1, drop = FALSE]
 
-# --- VISUALIZATION ---
-print("=== GLOBAL SUMMARY (MEIOFAUNA - UNIQUE ASVs) ===")
-print(tabla_global_final)
+# B. Sincronice samples
+valid_samples_meio <- rowSums(comm_meio_beta) > 0
+comm_meio_beta     <- comm_meio_beta[valid_samples_meio, , drop = FALSE]
+ecol_meio_beta     <- ecol[valid_samples_meio, ]
+ecol_meio_beta$Mesh <- as.factor(ecol_meio_beta$Mesh)
 
-# --- EXPORT TO CSV ---
-write.csv(tabla_global_final, "Resumen_Global_Meiofauna_Unicos_95_97.csv", row.names = FALSE)
-write.csv(tabla_ancha_97, "Matriz_Phylum_Papers_Unicos_Menor97.csv", row.names = FALSE)
-write.csv(tabla_ancha_95, "Matriz_Phylum_Papers_Unicos_Menor95.csv", row.names = FALSE)
+stopifnot(all(rownames(comm_meio_beta) == ecol_meio_beta$sample_ID))
+
+# C. Build alignment and phylogenetic master tree
+seqs_meio <- DNAStringSet(species_meio$sequence)
+names(seqs_meio) <- species_meio$ASVid
+writeXStringSet(seqs_meio, filepath = "Sequences_meioAntarctica18S.fasta", format = "fasta")
+
+alignment_meio   <- AlignSeqs(seqs_meio)
+phy_data_meio    <- phyDat(as.matrix(alignment_meio), type = "DNA")
+dist_matrix_meio <- dist.ml(phy_data_meio) 
+tree_master      <- NJ(dist_matrix_meio)
+
+# D. Keep only ASVs from the filtered matrix
+tree_meio_beta <- keep.tip(tree_master, intersect(tree_master$tip.label, colnames(comm_meio_beta)))
 
 
+## Meiofauna (Beta Phyl) ----------------------------------------
 
-## Taxa counts
+# Calculate beta with filtered tree
+beta_phylo_meio <- BAT::beta(comm_meio_beta, tree = tree_meio_beta, func = "jaccard", abund = FALSE)
 
-# 1. Map filenames to their respective Ref IDs 
-# (This avoids having to manually read and create Ref1, Ref2, etc., one by one)
-dataset_files <- c(
-  "Ref1"  = "Data18S_Antarctica_v2.csv",
-  "Ref2"  = "Data18S_Asinara_v2.csv",
-  "Ref3"  = "Data18S_Cordier2021_v2.csv",
-  "Ref4"  = "Data18S_Degenhardt2021_v2.csv",
-  "Ref5"  = "Data18S_Fonseca2017.csv",
-  "Ref6"  = "Data18S_Haenel2017_v2.csv",
-  "Ref7"  = "Data18S_JondeliusAtherton2020.csv",
-  "Ref8"  = "Data18S_Kapshyna2024_v2.csv",
-  "Ref9"  = "Data18S_Mazurkiewicz2024.csv",
-  "Ref10" = "Data18S_Polinski2019_v2.csv"
+# PERMANOVA
+adonis_meio_phyl <- adonis2(
+  beta_phylo_meio$Btotal ~ scale(depth) + Mesh + habitat_norm, 
+  data   = ecol_meio_beta, 
+  strata = ecol_meio_beta$ID, 
+  by     = "margin"
+)
+print(adonis_meio_phyl)
+
+# Proportions Turnover vs. Nestedness
+mean_total_meio      <- mean(as.dist(beta_phylo_meio$Btotal), na.rm = TRUE)
+mean_turnover_meio   <- mean(as.dist(beta_phylo_meio$Brepl), na.rm = TRUE)
+mean_nestedness_meio <- mean(as.dist(beta_phylo_meio$Brich), na.rm = TRUE)
+
+per_turnover_meio   <- (mean_turnover_meio / mean_total_meio) * 100
+per_nestedness_meio <- (mean_nestedness_meio / mean_total_meio) * 100
+
+cat("Total Meiofauna Phylogenetic Turnover:", round(per_turnover_meio, 2), "%\n")
+cat("Total Meiofauna Phylogenetic Nestedness:", round(per_nestedness_meio, 2), "%\n")
+
+
+## Copepoda (Beta Phyl) ---------------------------------------------------
+
+cop_asvs <- species_meio %>%
+  filter(Best.group == "Copepoda") %>%
+  pull(ASVid)
+
+comm_cop_pa <- comm_meio_beta[, colnames(comm_meio_beta) %in% cop_asvs, drop = FALSE]
+
+# Sincronize valid samples 
+valid_samples_cop <- rowSums(comm_cop_pa) > 0
+comm_cop_pa       <- comm_cop_pa[valid_samples_cop, , drop = FALSE]
+ecol_cop          <- ecol_meio_beta[valid_samples_cop, ]
+ecol_cop$Mesh     <- as.factor(ecol_cop$Mesh)
+
+# Filter tree
+tree_cop <- keep.tip(tree_meio_beta, intersect(tree_meio_beta$tip.label, colnames(comm_cop_pa)))
+
+# Beta phylogenetic and PERMANOVA
+beta_phylo_cop <- BAT::beta(comm_cop_pa, tree = tree_cop, func = "jaccard", abund = FALSE)
+
+adonis_cop_phyl <- adonis2(
+  beta_phylo_cop$Btotal ~ scale(depth) + Mesh + habitat_norm, 
+  data   = ecol_cop, 
+  strata = ecol_cop$ID, 
+  by     = "margin"
+)
+print(adonis_cop_phyl)
+
+# Proporitions
+mean_total_cop      <- mean(as.dist(beta_phylo_cop$Btotal), na.rm = TRUE)
+mean_turnover_cop   <- mean(as.dist(beta_phylo_cop$Brepl), na.rm = TRUE)
+mean_nestedness_cop <- mean(as.dist(beta_phylo_cop$Brich), na.rm = TRUE)
+
+per_turnover_cop   <- (mean_turnover_cop / mean_total_cop) * 100
+per_nestedness_cop <- (mean_nestedness_cop / mean_total_cop) * 100
+
+cat("Copepoda Phylogenetic Turnover:", round(per_turnover_cop, 2), "%\n")
+cat("Copepoda Phylogenetic Nestedness:", round(per_nestedness_cop, 2), "%\n")
+
+
+## Nematoda (Beta Phyl) ---------------------------------------------------
+
+nem_asvs <- species_meio %>%
+  filter(Best.group == "Nematoda") %>%
+  pull(ASVid)
+
+comm_nem_pa <- comm_meio_beta[, colnames(comm_meio_beta) %in% nem_asvs, drop = FALSE]
+
+# Sincronize samples
+valid_samples_nem <- rowSums(comm_nem_pa) > 0
+comm_nem_pa       <- comm_nem_pa[valid_samples_nem, , drop = FALSE]
+ecol_nem          <- ecol_meio_beta[valid_samples_nem, ]
+ecol_nem$Mesh     <- as.factor(ecol_nem$Mesh)
+
+# Filter tree
+tree_nem <- keep.tip(tree_meio_beta, intersect(tree_meio_beta$tip.label, colnames(comm_nem_pa)))
+
+# Beta phylogenetic and PERMANOVA
+beta_phylo_nem <- BAT::beta(comm_nem_pa, tree = tree_nem, func = "jaccard", abund = FALSE)
+
+adonis_nem_phyl <- adonis2(
+  beta_phylo_nem$Btotal ~ scale(depth) + Mesh + habitat_norm, 
+  data   = ecol_nem, 
+  strata = ecol_nem$ID, 
+  by     = "margin"
+)
+print(adonis_nem_phyl)
+
+# Proportions
+mean_total_nem      <- mean(as.dist(beta_phylo_nem$Btotal), na.rm = TRUE)
+mean_turnover_nem   <- mean(as.dist(beta_phylo_nem$Brepl), na.rm = TRUE)
+mean_nestedness_nem <- mean(as.dist(beta_phylo_nem$Brich), na.rm = TRUE)
+
+per_turnover_nem   <- (mean_turnover_nem / mean_total_nem) * 100
+per_nestedness_nem <- (mean_nestedness_nem / mean_total_nem) * 100
+
+cat("Nematoda Phylogenetic Turnover:", round(per_turnover_nem, 2), "%\n")
+cat("Nematoda Phylogenetic Nestedness:", round(per_nestedness_nem, 2), "%\n")
+
+
+## Tables with results beta phyl----------------------------------------------
+
+partition_summary_df <- data.frame(
+  Taxonomic_Group = c("Total Meiofauna", "Copepoda", "Nematoda", "Platyhelminthes"),
+  Mean_Phylo_Btotal = round(c(mean_total_meio, mean_total_cop, mean_total_nem, mean_total_plat), 4),
+  Mean_Phylo_Brepl  = round(c(mean_turnover_meio, mean_turnover_cop, mean_turnover_nem, mean_turnover_plat), 4),
+  Mean_Phylo_Brich  = round(c(mean_nestedness_meio, mean_nestedness_cop, mean_nestedness_nem, mean_nestedness_plat), 4),
+  Pct_Turnover      = round(c(per_turnover_meio, per_turnover_cop, per_turnover_nem, per_turnover_plat), 2),
+  Pct_Nestedness    = round(c(per_nestedness_plat, per_nestedness_cop, per_nestedness_nem, per_nestedness_plat), 2)
 )
 
-# Load all datasets directly into a list
-lista_Refs <- lapply(dataset_files, read.csv, sep = ";")
-
-# 2. Filter datasets and bind them into a single master dataframe
-Ref_maestra <- bind_rows(
-  lapply(lista_Refs, function(Ref) {
-    
-    # Check if 'rare.asvs' column exists and filter if it does
-    if("rare.asvs" %in% colnames(Ref)) {
-      Ref <- Ref %>% filter(rare.asvs %in% c(FALSE, "FALSE", "false", "False", 0))
-    }
-    
-    Ref %>% 
-      filter(
-        # Filter only meiofauna
-        Tax.eco.meio %in% c(TRUE, "TRUE", "true", "True"),
-        # Only correct assignments
-        Eval.result == "correct"
-      ) %>%
-      # Crucial step! Remove duplicate ASVs, keeping the first occurrence
-      distinct(ASVid, .keep_all = TRUE) %>%
-      # Select relevant columns
-      select(ASVid, Best.group, nreads) 
-  }),
-  .id = "dataset"
+excel_phylo_list <- list(
+  "Partition_Summary" = partition_summary_df,
+  "Total_Meiofauna"   = clean_adonis_df(adonis_meio_phyl),
+  "Copepoda"          = clean_adonis_df(adonis_cop_phyl),
+  "Nematoda"          = clean_adonis_df(adonis_nem_phyl),
+  "Platyhelminthes"   = clean_adonis_df(adonis_plat_phyl)
 )
 
-# 3. Calculate total reads per dataset
-total_reads_Ref <- Ref_maestra %>%
-  group_by(dataset) %>%
-  summarise(count = sum(nreads, na.rm = TRUE), .groups = "drop") %>%
-  mutate(taxa = "total_reads") %>%
-  pivot_wider(names_from = dataset, values_from = count, values_fill = 0)
+write_xlsx(excel_phylo_list, path = "Results_Adonis_Beta_Phylo_ALL_Filtered.xlsx")
 
-# 4. Calculate ASVs by taxonomic group
-asvs_por_grupo_Ref <- Ref_maestra %>%
-  filter(nreads > 0) %>% 
-  group_by(dataset, Best.group) %>%
-  summarise(count = n_distinct(ASVid), .groups = "drop") %>%
-  rename(taxa = Best.group) %>%
-  pivot_wider(names_from = dataset, values_from = count, values_fill = 0) %>%
-  arrange(taxa)
-
-# 5. Unify and export
-final_table <- bind_rows(total_reads_Ref, asvs_por_grupo_Ref)
-
-write_csv2(final_table, "taxa_counts_meiofauna.csv")
-
-# View the result
-print(final_table)
+cat("File 'Results_Adonis_Beta_Phylo_ALL_Filtered.xlsx' created successfully!\n")
 
 
-
-## HEATMAP WITH METABARCODING PAPERS 
-
-# 1. CUSTOM COLORS (Re-declared here for self-contained execution)
-paper_colors_heatmap <- c(
-  "Ref3"  = "#d4f0fe", "Ref4"  = "#15adf8", "Ref6"   = "#0697e0",
-  "Ref7"  = "#057eb9", "Ref8"  = "#046493", "Ref9"   = "#012334",
-  "Ref10" = "#ffe103", "Ref2"  = "#fbc400", "Ref1"   = "#fb8500",
-  "Ref5"  = "#723c00"
-)
-
-# 2. LOAD AND PREPARE DATA
-df_raw <- read.csv("taxa_counts_meiofauna.csv", sep = ";")
-
-# Remove the total_reads row (not used for this calculation)
-df_taxa <- df_raw %>% filter(taxa != "total_reads")
-
-# Convert to long format
-df_long <- df_taxa %>%
-  pivot_longer(cols = -taxa, names_to = "Ref", values_to = "ASV_count") %>%
-  mutate(ASV_count = as.numeric(ASV_count))
-
-# Calculate the ACTUAL TOTAL ASVs for each reference
-totals_df <- df_long %>%
-  group_by(Ref) %>%
-  summarise(Total_ASVs = sum(ASV_count, na.rm = TRUE), .groups = "drop")
-
-# 3. NORMALIZE DATA (Percentages)
-df_final <- df_long %>%
-  left_join(totals_df, by = "Ref") %>%
-  mutate(
-    # Calculate the percentage of total ASVs
-    percentage = (ASV_count / Total_ASVs) * 100,
-    # Set 0 to NA for transparency (white in heatmap)
-    alpha_val = na_if(percentage, 0),
-    # Create text label with rounded percentage
-    label_text = ifelse(is.na(alpha_val), "", paste0(round(percentage, 1)))
-  )
-
-# 4. CREATE ABSOLUTE TOTALS ROW
-totals_row <- totals_df %>%
-  mutate(
-    taxa = "Total ASVs",
-    ASV_count = Total_ASVs,
-    percentage = NA,
-    alpha_val = NA, # Since it's NA, R won't color it (it will remain white)
-    label_text = as.character(Total_ASVs) # Here we only display the absolute number
-  )
-
-# Bind the normal data with the totals row
-df_plot <- bind_rows(df_final, totals_row)
-
-# 5. ORDER FACTORS (For X and Y axes)
-orden_refs <- c("Ref1", "Ref5", "Ref2", "Ref10", "Ref3", "Ref4", "Ref6", "Ref7", "Ref8", "Ref9")
-df_plot$Ref <- factor(df_plot$Ref, levels = orden_refs)
-
-# Order the Y axis alphabetically, but force "Total ASVs" to the end
-taxa_levels <- c(sort(unique(df_taxa$taxa)), "Total ASVs")
-df_plot$taxa <- factor(df_plot$taxa, levels = taxa_levels)
-
-# 6. PLOT HEATMAP
-plot_heatmap <- ggplot(df_plot, aes(x = Ref, y = taxa)) +
-  
-  # Color layer (now based on percentage)
-  geom_tile(aes(fill = Ref, alpha = alpha_val), color = "white", linewidth = 0.5) +
-  
-  # Text layer (Percentages on top, absolute numbers on the last row)
-  geom_text(aes(label = label_text), color = "black", size = 3) +
-  
-  scale_fill_manual(values = paper_colors_heatmap, guide = "none") + 
-  
-  # Transparency scale (Linear, no log needed since it's 0-100%)
-  scale_alpha_continuous(
-    range = c(0.2, 1), 
-    trans = "sqrt",
-    name = "Relative Richness\n(% of ASVs)",
-    na.value = 0 # This makes zeros and the Totals row white
-  ) +
-  
-  # Reverse Y axis so it reads top-to-bottom
-  scale_y_discrete(limits = rev) +
-  
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(
-      angle = 45, 
-      hjust = 1, 
-      face = "bold",
-      color = paper_colors_heatmap[levels(df_plot$Ref)]
-    ),
-    # Make the "Total ASVs" label bold on the Y axis for emphasis
-    axis.text.y = element_text(
-      size = 10, 
-      face = ifelse(rev(levels(df_plot$taxa)) == "Total ASVs", "bold", "plain")
-    ),
-    panel.grid = element_blank(), 
-    panel.background = element_rect(fill = "#fdfdfd", color = NA),
-    plot.title = element_text(face = "bold", hjust = 0.5, margin = margin(b=15))
-  ) +
-  labs(
-    title = "ASV Composition by Taxonomic Group",
-    x = "Reference",
-    y = "Taxonomic Group"
-  )
-
-plot_heatmap
 
 ### Figure 4: Phylogenetic tree ---------------------------------------------------
 
-# Function: dataframe to FASTA
-
 dataframe2fas <- function(x, file) {
-  
   if (!is.data.frame(x)) {
     x <- as.data.frame(x)
   }
-  
   if (ncol(x) != 2) {
     stop("Input dataframe must contain exactly two columns.")
   }
-  
   fasta_lines <- unlist(
     lapply(seq_len(nrow(x)), function(i) {
       c(
@@ -2902,16 +1300,13 @@ dataframe2fas <- function(x, file) {
       )
     })
   )
-  
   writeLines(fasta_lines, file)
-  
   invisible(fasta_lines)
 }
 
-
-# Export sequences to FASTA
+# Export sequences to FASTA using species_meio (FIXED: replaced 'species' with 'species_meio')
 dataframe2fas(
-  species[, c("ASVid", "sequence")],
+  species_meio[, c("ASVid", "sequence")],
   file = "sequences.fasta"
 )
 
@@ -2924,7 +1319,7 @@ alignment <- msa(
   type = "dna"
 )
 
-alignment_phydat <- msaConvert(       # this step took several hours
+alignment_phydat <- msaConvert(
   alignment,
   type = "phangorn::phyDat"
 )
@@ -2933,7 +1328,6 @@ alignment_phydat <- msaConvert(       # this step took several hours
 dist_matrix <- dist.ml(alignment_phydat)
 tree_start <- NJ(dist_matrix)
 tree_start$tip.label <- names(alignment_phydat)
-
 
 # Constraint tree
 constraint_tree <- read.tree(
@@ -2964,8 +1358,7 @@ plot(
   show.tip.label = FALSE
 )
 
-
-# Optional: ultrametric tree
+# Ultrametric tree
 tree_ultra <- chronos(tree_ml$tree)
 
 plot(
@@ -2981,203 +1374,113 @@ save(tree_ultra, file = "tree_ultra.RData")
 
 ### Figure 5: Histograms ---------------------------------------------------
 
-# 1. Convert the community matrix to long format
-# We do this globally just once to make the code cleaner and faster
-comm_long <- comm %>%
+comm_target <- comm_meio 
+
+comm_long <- comm_target %>%
   as.data.frame() %>%
   rownames_to_column(var = "sample_ID") %>%
   pivot_longer(-sample_ID, names_to = "ASVid", values_to = "count") %>%
-  filter(count > 0)  # Filter to keep only present ASVs
+  filter(count > 0)
 
-# Define taxon levels to maintain a consistent order across all plots
+# Levels and colours
 taxon_levels <- c(
   "Xenacoelomorpha", "Priapulida", "Nematoda", "Tardigrada", "Acari", "Ostracoda", "Copepoda",
   "Gnathostomulida", "Rotifera", "Gastrotricha", "Platyhelminthes", "Annelida"
 )
 
-# Assign colors to each taxon according to the desired groups
 taxon_colors <- c(
-  "Xenacoelomorpha" = "white",      # Group 1 (Xenacoelomorpha)
-  "Priapulida"      = "#d4f0fe",    # Group 2 (Ecdysozoa)
-  "Nematoda"        = "#15adf8",    # Group 2 (Ecdysozoa)
-  "Tardigrada"      = "#0697e0",    # Group 2 (Ecdysozoa)
-  "Acari"           = "#057eb9",    # Group 2 (Ecdysozoa)
-  "Ostracoda"       = "#046493",    # Group 2 (Ecdysozoa)
-  "Copepoda"        = "#012334",    # Group 2 (Ecdysozoa)
-  "Gnathostomulida" = "#ffe103",    # Group 3 (Lophotrochozoa)
-  "Rotifera"        = "#fbc400",    # Group 3 (Lophotrochozoa)
-  "Gastrotricha"    = "#fb8500",    # Group 3 (Lophotrochozoa)
-  "Platyhelminthes" = "#d47000",    # Group 3 (Lophotrochozoa)
-  "Annelida"        = "#723c00"     # Group 3 (Lophotrochozoa)
+  "Xenacoelomorpha" = "white",
+  "Priapulida"      = "#d4f0fe",
+  "Nematoda"        = "#15adf8",
+  "Tardigrada"      = "#0697e0",
+  "Acari"           = "#057eb9",
+  "Ostracoda"       = "#046493",
+  "Copepoda"        = "#012334",
+  "Gnathostomulida" = "#ffe103",
+  "Rotifera"        = "#fbc400",
+  "Gastrotricha"    = "#fb8500",
+  "Platyhelminthes" = "#d47000",
+  "Annelida"        = "#723c00"
 )
 
-
-## A. Mesh Size 
-
-# Merge ecological and species info
+## A. Mesh Size (FIXED: joins directly with species_meio)
 df_mesh <- comm_long %>%
-  inner_join(species, by = "ASVid") %>%
+  inner_join(species_meio, by = "ASVid") %>%
   inner_join(ecol, by = "sample_ID") %>%
-  filter(!is.na(Mesh)) %>%                  # Remove NAs in Mesh
-  filter(Mesh %in% c(20, 50, 100, 200)) %>% # Keep only target mesh sizes
+  filter(!is.na(Mesh) & Mesh %in% c(20, 50, 100, 200)) %>%
   group_by(Mesh, Best.group) %>%
-  summarise(ASV_count = n(), .groups = "drop")
+  summarise(ASV_count = n_distinct(ASVid), .groups = "drop") %>%
+  mutate(Best.group = factor(Best.group, levels = taxon_levels))
 
-# Order the Best.group factor levels
-df_mesh$Best.group <- factor(df_mesh$Best.group, levels = taxon_levels)
-ecol$Mesh <- as.factor(ecol$Mesh)
-
-# Create the stacked horizontal bar chart
-ggplot(df_mesh, aes(x = factor(Mesh), y = ASV_count, fill = Best.group)) +
-  geom_bar(stat = "identity", position = "fill", color = "black") +
-  scale_fill_manual(values = taxon_colors) +
-  labs(
-    x = "Mesh size",
-    y = "Proportion of ASVs",
-    fill = "Taxon",
-    title = "Proportion of ASVs by Taxon and Mesh Size"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "right"
-  )
-
-
-## B. Habitat Type 
-
-# Merge ecological and species info
-df_habitat <- comm_long %>%
-  inner_join(species, by = "ASVid") %>%
-  inner_join(ecol, by = "sample_ID") %>%
-  filter(!is.na(habitat_norm)) %>%          # Remove NAs in habitat
-  group_by(habitat_norm, Best.group) %>%
-  summarise(ASV_count = n(), .groups = "drop")
-
-# Order factor levels for Best.group and habitat_norm
-df_habitat$Best.group <- factor(df_habitat$Best.group, levels = taxon_levels)
-
-df_habitat$habitat_norm <- factor(df_habitat$habitat_norm, levels = c(
-  "epilithic", "organic", "spicule", "gravel", "sand", "silt"
-))
-
-# Create the stacked horizontal bar chart
-ggplot(df_habitat, aes(x = habitat_norm, y = ASV_count, fill = Best.group)) +
-  geom_bar(stat = "identity", position = "fill", color = "black") +
-  scale_fill_manual(values = taxon_colors) +
-  labs(
-    x = "Habitat type",
-    y = "Proportion of ASVs",
-    fill = "Taxon",
-    title = "Proportion of ASVs by Taxon and Habitat"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "right"
-  )
-
-
-## C. Depth 
-
-# Merge ecological and species info
-df_depth <- comm_long %>%
-  inner_join(species, by = "ASVid") %>%
-  inner_join(ecol, by = "sample_ID") %>%
-  filter(!is.na(depth)) %>%                 # Remove NAs in depth
-  group_by(depth, Best.group) %>%
-  summarise(ASV_count = n(), .groups = "drop")
-
-# Order the Best.group factor levels
-df_depth$Best.group <- factor(df_depth$Best.group, levels = taxon_levels)
-
-# Plot 1: Stacked bar chart (Proportions)
-ggplot(df_depth, aes(x = depth, y = ASV_count, fill = Best.group)) +
-  geom_bar(stat = "identity", position = "fill", color = "black") +
-  scale_fill_manual(values = taxon_colors) +
-  labs(
-    x = "Depth (m)",
-    y = "Proportion of ASVs",
-    fill = "Taxon",
-    title = "Proportion of ASVs by Taxon and Depth"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "right"
-  )
-
-# Plot 2: Stacked area chart (Absolute counts / Richness)
-ggplot(df_depth, aes(x = depth, y = ASV_count, fill = Best.group)) +
-  geom_area(position = "stack", color = "black") +
-  scale_fill_manual(values = taxon_colors) +
-  labs(
-    x = "Depth (m)",
-    y = "Richness of ASVs",
-    fill = "Taxon",
-    title = "Richness of ASVs across Depth"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "right"
-  )
-
-# Plot 3: Stacked area chart (Proportions)
-
-# 1. Prepare data by calculating proportions for each depth level
-df_prop <- df_depth %>%
-  group_by(depth) %>%
-  mutate(proportion = ASV_count / sum(ASV_count)) %>%
-  ungroup()
-
-# 2. Stacked Area Plot (Proportional)
-ggplot(df_prop, aes(x = depth, y = proportion, fill = Best.group)) +
-  # Use geom_area with position = "fill" to ensure it reaches 100%
-  geom_area(position = "fill", alpha = 0.9) + 
-  # Optional: add subtle lines between areas
-  geom_line(position = "fill", color = "black", linewidth = 0.2) +
-  scale_fill_manual(values = taxon_colors) +
+plot_mesh <- ggplot(df_mesh, aes(x = factor(Mesh), y = ASV_count, fill = Best.group)) +
+  geom_bar(stat = "identity", position = "fill", color = "black", width = 0.7) +
+  scale_fill_manual(values = taxon_colors, drop = FALSE) +
   scale_y_continuous(labels = scales::percent, expand = c(0,0)) +
-  scale_x_continuous(expand = c(0,0)) +
-  labs(
-    x = "Depth (m)",
-    y = "Proportion of ASVs (%)",
-    fill = "Taxon",
-    title = "Relative Taxonomic Composition across Depth"
-  ) +
+  labs(x = "Mesh size (µm)", y = "Proportion of ASVs", fill = "Taxon", title = "A) Mesh Size") +
   theme_minimal(base_size = 14) +
-  theme(
-    panel.grid.minor = element_blank(),
-    legend.position = "right"
+  theme(panel.grid.minor = element_blank(), legend.position = "right")
+
+## B. Habitat Type (FIXED: joins directly with species_meio)
+df_habitat <- comm_long %>%
+  inner_join(species_meio, by = "ASVid") %>%
+  inner_join(ecol, by = "sample_ID") %>%
+  filter(!is.na(habitat_norm)) %>%
+  group_by(habitat_norm, Best.group) %>%
+  summarise(ASV_count = n_distinct(ASVid), .groups = "drop") %>%
+  mutate(
+    Best.group   = factor(Best.group, levels = taxon_levels),
+    habitat_norm = factor(habitat_norm, levels = c("epilithic", "organic", "spicule", "gravel", "sand", "silt"))
   )
 
+plot_habitat <- ggplot(df_habitat, aes(x = habitat_norm, y = ASV_count, fill = Best.group)) +
+  geom_bar(stat = "identity", position = "fill", color = "black", width = 0.7) +
+  scale_fill_manual(values = taxon_colors, drop = FALSE) +
+  scale_y_continuous(labels = scales::percent, expand = c(0,0)) +
+  labs(x = "Habitat type", y = "Proportion of ASVs", fill = "Taxon", title = "B) Habitat Type") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "right")
+
+## C. Depth (FIXED: joins directly with species_meio)
+df_depth <- comm_long %>%
+  inner_join(species_meio, by = "ASVid") %>%
+  inner_join(ecol, by = "sample_ID") %>%
+  filter(!is.na(depth)) %>%
+  mutate(depth_bin = cut(depth, breaks = seq(0, 80, by = 10), include.lowest = TRUE)) %>%
+  group_by(depth_bin, Best.group) %>%
+  summarise(ASV_count = n_distinct(ASVid), .groups = "drop") %>%
+  mutate(Best.group = factor(Best.group, levels = taxon_levels))
+
+plot_depth <- ggplot(df_depth, aes(x = depth_bin, y = ASV_count, fill = Best.group)) +
+  geom_bar(stat = "identity", position = "fill", color = "black", width = 0.8) +
+  scale_fill_manual(values = taxon_colors, drop = FALSE) +
+  scale_y_continuous(labels = scales::percent, expand = c(0,0)) +
+  labs(x = "Depth range (m)", y = "Proportion of ASVs", fill = "Taxon", title = "C) Depth") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "right")
+
+
+plot_mesh
+plot_habitat
+plot_depth
 
 
 ### Figure 6: Venn diagram ----------------------------------------------------------
 
-# Create a temporary dataframe to avoid modifying the original 'comm' matrix.
-# We append the 'Mesh' variable from the 'ecol' dataset.
-comm_venn <- comm %>%
+comm_venn <- comm_meio_pa %>%
   as.data.frame() %>%
   mutate(Mesh = factor(ecol$Mesh, levels = c("20", "50", "100", "200")))
 
-# Group by Mesh and detect presence of ASVs 
-# (Using > 0 is safer than == 1 in case of abundance matrices)
 asv_sets <- comm_venn %>%
   group_by(Mesh) %>%
   summarise(across(where(is.numeric), ~ any(. > 0)), .groups = "drop") %>%
   as.data.frame()
 
-# Generate a list of ASVs present for each mesh size
 set_list <- lapply(split(asv_sets[, -1], asv_sets$Mesh), function(x) {
   colnames(x)[which(as.logical(x))]
 })
 
-# Ensure the names in set_list are explicitly ordered
 set_list <- set_list[c("20", "50", "100", "200")]
 
-# Define colors by mesh size (ordered from lightest to darkest)
 mesh_colors <- c(
   "20"  = "#cce4f6",
   "50"  = "#66b3e6",
@@ -3185,10 +1488,8 @@ mesh_colors <- c(
   "200" = "#012334"
 )
 
-# Clear any previous plots to prevent overlapping in the viewing window
 grid.newpage()
 
-# Draw the Venn diagram with the desired colors and order
 venn.plot <- venn.diagram(
   x = set_list,
   filename = NULL,
@@ -3200,72 +1501,576 @@ venn.plot <- venn.diagram(
   cat.pos = 0
 )
 
-# Render the plot
 grid.draw(venn.plot)
 
 
+#### C. Metabarcoding papers comparison--------------------------
 
-### Figure S1 ----------------------------------------------------------
+# Unified Master Color Palette
+paper_colors <- c(
+  "Ref1"   = "#fb8500", "Ref2"  = "#fbc400", "Ref3"   = "#cb4c07",
+  "Ref4"   = "#15adf8", "Ref5"  = "#723c00", "Ref6"   = "#0697e0",
+  "Ref7"   = "#057eb9", "Ref6+7"= "#068fdc", "Ref8"   = "#046493",
+  "Ref9"   = "#012334", "Ref10" = "#ffe103"
+)
 
-# 1. READ THE FILE
-# We use check.names = FALSE so R doesn't replace spaces/parentheses with dots
-df_s6 <- read.csv("Table_S6.csv", sep = ";", stringsAsFactors = FALSE, check.names = FALSE)
+# Section 1: MASTER DATA PREPARATION & NOVELTY TABLES (1, 2, & 3)-------
 
-# Rename the first column generically to "Variable" for easier filtering
-colnames(df_s6)[1] <- "Variable"
+# 1. External Dataset Mapping
+datasets_ext <- tibble(
+  ref_id = paste0("Ref", 2:10),
+  filename = c(
+    "Data18S_Asinara_v2.csv", "Data18S_Cordier2021_v2.csv", "Data18S_Degenhardt2021_v2.csv", 
+    "Data18S_Fonseca2017.csv", "Data18S_Haenel2017_v2.csv", "Data18S_JondeliusAtherton2020.csv", 
+    "Data18S_Kapshyna2024_v2.csv", "Data18S_Mazurkiewicz2024.csv", "Data18S_Polinski2019_v2.csv"
+  ),
+  dataset_name = c(
+    "Asinara", "Cordier2021", "Degenhardt2021", "Fonseca2017", 
+    "Haenel2017", "Jondelius2020", "Kapshyna2024", "Mazurkiewicz2024", "Polinski2019"
+  )
+)
 
-# 2. EXTRACT AND CLEAN THE DATA
-# Find the exact row containing the global percentages and transform the table
-df_percentages <- df_s6 %>%
-  # Filter the row that contains the percentage text (ignoring the "by group" rows)
-  filter(
-    str_detect(Variable, "Percentage of ASVs with <95% identity") & 
-      !str_detect(Variable, "by group")
-  ) %>%
-  # Pivot the study columns into rows (long format)
-  pivot_longer(cols = -Variable, names_to = "Study", values_to = "Percentage") %>%
-  # Ensure the percentage is numeric
-  mutate(Percentage = as.numeric(Percentage))
+all_global_list  <- list()
+all_phylum_list  <- list()
+meio_global_list <- list()
+meio_phylum_list <- list()
+ext_meio_master  <- list()
 
-# 3. SEPARATE "THIS STUDY" FROM THE REST
-# Extract the value for your study (looks for any column containing "This study")
-our_study_val <- df_percentages %>%
-  filter(str_detect(Study, "(?i)This study")) %>%
-  pull(Percentage)
-
-# Extract the values for the other published studies
-published_vals <- df_percentages %>%
-  filter(!str_detect(Study, "(?i)This study")) %>%
-  pull(Percentage)
-
-# 4. STATISTICAL CALCULATIONS (Gaussian Curve)
-mean_val <- mean(published_vals, na.rm = TRUE)
-sd_val <- sd(published_vals, na.rm = TRUE)
-
-# Generate the coordinates for the curve line
-x_val <- seq(5, 85, length.out = 200)
-y_val <- dnorm(x_val, mean = mean_val, sd = sd_val)
-
-# Prepare the exact dataframes for ggplot
-df_curve <- data.frame(x = x_val, y = y_val)
-df_published <- data.frame(x = published_vals, y = dnorm(published_vals, mean = mean_val, sd = sd_val))
-df_our <- data.frame(x = our_study_val, y = dnorm(our_study_val, mean = mean_val, sd = sd_val))
-
-# 5. DRAW THE FIGURE
-ggplot() +
-  # Main curve
-  geom_line(data = df_curve, aes(x = x, y = y), linewidth = 1) +
-  # Red dots (previous studies)
-  geom_point(data = df_published, aes(x = x, y = y), color = "red", size = 4) +
-  # Blue triangle (your study)
-  geom_point(data = df_our, aes(x = x, y = y), shape = 17, color = "blue", size = 6) +
+# 2. Process External Datasets
+for (i in seq_len(nrow(datasets_ext))) {
   
-  # Aesthetics and labels
-  theme_bw(base_size = 14) +
+  data <- read.csv(datasets_ext$filename[i], sep = ";", stringsAsFactors = FALSE)
+  
+  clean_data <- data %>%
+    filter(Eval.result == "correct") %>%
+    distinct(ASVid, .keep_all = TRUE) %>%
+    mutate(
+      similitud = as.numeric(str_split_i(label, "\\|", 4)),
+      phylum    = str_split_i(label, "\\|", 1),
+      nreads    = as.numeric(nreads)
+    )
+  
+  # A. Summary Lists: All ASVs
+  all_global_list[[i]] <- data.frame(
+    Dataset = datasets_ext$dataset_name[i],
+    Total_Reads = sum(clean_data$nreads, na.rm = TRUE),
+    Total_ASVs = nrow(clean_data)
+  )
+  
+  all_phylum_list[[i]] <- clean_data %>%
+    filter(!is.na(phylum) & phylum != "") %>%
+    group_by(phylum) %>%
+    summarise(Total_Unique_ASVs = n(), .groups = "drop") %>%
+    mutate(Dataset = datasets_ext$dataset_name[i])
+  
+  # B. Summary Lists: Meiofauna
+  meio_data <- clean_data %>%
+    filter(Tax.eco.meio == "TRUE" | Tax.eco.meio == TRUE)
+  
+  meio_global_list[[i]] <- data.frame(
+    Dataset = datasets_ext$dataset_name[i],
+    Total_Reads = sum(meio_data$nreads, na.rm = TRUE),
+    Total_ASVs = nrow(meio_data)
+  )
+  
+  meio_phylum_list[[i]] <- meio_data %>%
+    filter(!is.na(phylum) & phylum != "") %>%
+    group_by(phylum) %>%
+    summarise(
+      Total_Unique_ASVs = n(),
+      Perc_under_95     = mean(similitud < 95.0, na.rm = TRUE) * 100,
+      .groups = "drop"
+    ) %>%
+    mutate(Dataset = datasets_ext$dataset_name[i])
+  
+  # C. Store raw meiofauna for Master Ref Dataframe
+  ext_meio_master[[i]] <- meio_data %>%
+    select(ASVid, Best.group = phylum, nreads) %>%
+    mutate(dataset = datasets_ext$ref_id[i])
+}
+
+# 3. Process Antarctic Data (Ref1: Quality-Filtered & Post-27 Noise Threshold, Unrarefied)
+
+# Apply noise threshold (< 27 reads per sample = 0) on unrarefied comm_raw
+asvs_validos_ant <- intersect(colnames(comm_raw), species_tot$ASVid)
+comm_ant_27 <- comm_raw[, asvs_validos_ant, drop = FALSE]
+comm_ant_27[comm_ant_27 < 27] <- 0
+
+# Extract active ASVs (> 0 reads post-threshold)
+ant_active_reads <- colSums(comm_ant_27)
+ant_active_ids   <- names(ant_active_reads[ant_active_reads > 0])
+
+# Subset species metadata to active post-27 ASVs
+ant_asvs_clean <- species_tot %>%
+  filter(ASVid %in% ant_active_ids, !is.na(Best.group))
+
+ant_meio_clean <- ant_asvs_clean %>%
+  filter(Tax.eco.meio %in% c("TRUE", TRUE, 1, "permanent"))
+
+# Table Summaries for Antarctica (Post-27 noise filter, unrarefied)
+ant_global_all <- tibble(
+  Dataset = "Antarctica", 
+  Total_Reads = sum(comm_ant_27[, ant_asvs_clean$ASVid]), 
+  Total_ASVs = n_distinct(ant_asvs_clean$ASVid)
+)
+ant_phylum_all <- ant_asvs_clean %>% 
+  group_by(phylum = Best.group) %>% 
+  summarise(Total_Unique_ASVs = n_distinct(ASVid), .groups = "drop") %>% 
+  mutate(Dataset = "Antarctica")
+
+comm_ant_meio <- comm_ant_27[, ant_meio_clean$ASVid, drop = FALSE]
+
+ant_global_meio <- tibble(
+  Dataset = "Antarctica", 
+  Total_Reads = sum(comm_ant_meio), 
+  Total_ASVs = n_distinct(ant_meio_clean$ASVid)
+)
+
+ant_phylum_meio <- ant_meio_clean %>%
+  group_by(phylum = Best.group) %>%
+  summarise(
+    Total_Unique_ASVs = n_distinct(ASVid),
+    Perc_under_95 = mean(pident.max < 95, na.rm = TRUE) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(Dataset = "Antarctica")
+
+# Master Antarctic Meiofauna Dataframe (Ref1) for Ref_maestra & iNEXT
+ant_meio_reads <- colSums(comm_ant_meio)
+ant_meio_df <- ant_meio_clean %>%
+  mutate(
+    dataset = "Ref1",
+    nreads = ant_meio_reads[ASVid]
+  ) %>%
+  select(dataset, ASVid, Best.group, nreads)
+
+# 4. Construct Single Master Dataframe (Ref_maestra)
+Ref_maestra <- bind_rows(ant_meio_df, bind_rows(ext_meio_master))
+
+# 5. Format and Export Tables 1, 2, and 3
+all_global_clean  <- bind_rows(c(all_global_list, list(ant_global_all)))
+all_phylum_clean  <- bind_rows(c(all_phylum_list, list(ant_phylum_all)))
+meio_global_clean <- bind_rows(c(meio_global_list, list(ant_global_meio)))
+meio_phylum_clean <- bind_rows(c(meio_phylum_list, list(ant_phylum_meio)))
+
+format_summary_table <- function(global_df, phylum_df) {
+  wide_phylum <- phylum_df %>%
+    select(Dataset, phylum, Total_Unique_ASVs) %>%
+    pivot_wider(names_from = Dataset, values_from = Total_Unique_ASVs, values_fill = 0) %>%
+    arrange(phylum)
+  
+  reads_row <- global_df %>% select(Dataset, Total_Reads) %>% pivot_wider(names_from = Dataset, values_from = Total_Reads) %>% mutate(phylum = "total number of reads")
+  asvs_row  <- global_df %>% select(Dataset, Total_ASVs) %>% pivot_wider(names_from = Dataset, values_from = Total_ASVs) %>% mutate(phylum = "total number of ASVs")
+  
+  bind_rows(reads_row, asvs_row, wide_phylum)
+}
+
+table1_all       <- format_summary_table(all_global_clean, all_phylum_clean)
+table2_meiofauna <- format_summary_table(meio_global_clean, meio_phylum_clean)
+table3_under95   <- meio_phylum_clean %>%
+  select(Dataset, phylum, Perc_under_95) %>%
+  pivot_wider(names_from = Dataset, values_from = Perc_under_95, values_fill = 0) %>%
+  arrange(phylum)
+
+write_csv(table1_all, "Table1_All_ASVs_and_Reads.csv")
+write_csv(table2_meiofauna, "Table2_Meiofauna_ASVs_and_Reads.csv")
+write_csv(table3_under95, "Table3_Phylum_Matrix_Unique_Under95.csv")
+
+# 6. Export Filtered Species Metadata (All original columns retained) ----------------
+
+# A. Complete filtered dataset for Antarctica (Table 1: All ASVs post-27 threshold)
+species_ant_filtered_all <- species_tot %>%
+  filter(ASVid %in% ant_asvs_clean$ASVid) %>%
+  mutate(nreads_post27 = ant_active_reads[ASVid]) # Añade el total de lecturas pos-filtro
+
+# B. Meiofauna-only filtered dataset for Antarctica (Table 2)
+species_ant_filtered_meio <- species_tot %>%
+  filter(ASVid %in% ant_meio_clean$ASVid) %>%
+  mutate(nreads_post27 = ant_meio_reads[ASVid])
+
+# Export to CSV
+write_csv(species_ant_filtered_all, "Species_Antarctica_Filtered_Table1_All.csv")
+write_csv(species_ant_filtered_meio, "Species_Antarctica_Filtered_Table2_Meiofauna.csv")
+
+# Section 2: NETWORK COMPARISON & SHARED ASVs----------------------------------------
+
+
+# 1. Geographic Node Preparation
+world_map <- map_data("world")
+
+ecol_raw <- read.csv("stations network.csv", sep = ";") %>%
+  mutate(
+    lat = as.numeric(gsub(",", ".", latitude)),
+    lon = as.numeric(gsub(",", ".", longitude)),
+    lat = ifelse(regional_location == "Antarctica", -abs(lat), lat),
+    studyid = as.character(studyid)
+  ) %>% 
+  filter(!is.na(lat))
+
+coord_combined <- ecol_raw %>%
+  filter(studyid %in% c("Ref6", "Ref7")) %>%
+  summarise(studyid = "Ref6+7", lon = mean(lon), lat = mean(lat))
+
+ecol_comb <- ecol_raw %>%
+  filter(!studyid %in% c("Ref6", "Ref7")) %>%
+  bind_rows(coord_combined) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+
+nodos_comb <- ecol_comb %>%
+  st_drop_geometry() %>%
+  select(id = studyid, lon, lat) %>%
+  distinct(id, .keep_all = TRUE) %>%
+  mutate(lon_jitter = jitter(lon, amount = 2), lat_jitter = jitter(lat, amount = 2))
+
+edges_base_limpia <- read.csv("edges_clean.csv", sep = ";") %>%
+  mutate(from = as.character(from), to = as.character(to))
+
+# 2. Global Network Map
+graph_geo_comb <- tbl_graph(nodes = nodos_comb, edges = edges_base_limpia %>% uncount(weight), directed = FALSE)
+
+set.seed(42)
+plot_geo_map_comb <- ggraph(graph_geo_comb, layout = "manual", x = lon_jitter, y = lat_jitter) +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group), fill = "#e8e8e8", color = NA) +
+  geom_edge_fan(color = "#2c3e50", width = 0.1, alpha = 0.5, spread = 1, show.legend = FALSE) +
+  geom_node_point(aes(color = id), size = 4, show.legend = FALSE) +
+  geom_node_label(aes(label = id, fill = id), repel = TRUE, size = 3.5, fontface = "bold", color = "black", alpha = 0.8, max.overlaps = Inf, show.legend = FALSE) +
+  scale_fill_manual(values = paper_colors) +
+  scale_color_manual(values = paper_colors) +
+  coord_fixed(ratio = 1.3, xlim = c(-180, 180), ylim = c(-90, 90)) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16, margin = margin(b=10)))
+
+# 3. Europe Zoom Map
+refs_interes <- c("Ref2", "Ref3", "Ref4", "Ref6+7", "Ref8", "Ref9")
+
+edges_eu_comb <- edges_base_limpia %>%
+  filter(from %in% refs_interes & to %in% refs_interes) %>%
+  uncount(weight)
+
+nodos_eu_comb <- ecol_comb %>%
+  st_drop_geometry() %>%
+  select(id = studyid, lon, lat) %>%
+  distinct(id, .keep_all = TRUE) %>%
+  filter(id %in% refs_interes) %>%
+  mutate(lon_jitter = jitter(lon, amount = 0.5), lat_jitter = jitter(lat, amount = 0.5))
+
+graph_geo_eu_comb <- tbl_graph(nodes = nodos_eu_comb, edges = edges_eu_comb, directed = FALSE)
+
+set.seed(42)
+plot_eu_comb <- ggraph(graph_geo_eu_comb, layout = "manual", x = lon_jitter, y = lat_jitter) +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group), fill = "#e8e8e8", color = NA) +
+  geom_edge_fan(color = "#2c3e50", width = 0.1, alpha = 0.5, spread = 1, show.legend = FALSE) +
+  geom_node_point(aes(color = id), size = 4, show.legend = FALSE) +
+  geom_node_label(aes(label = id, fill = id), repel = TRUE, size = 3.5, fontface = "bold", color = "black", alpha = 0.8, max.overlaps = Inf, show.legend = FALSE) +
+  scale_fill_manual(values = paper_colors) +
+  scale_color_manual(values = paper_colors) +
+  coord_fixed(ratio = 1.3, xlim = c(-2, 20), ylim = c(36, 70)) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16, margin = margin(b=10)),
+    labs(title = "ASV Connectivity: North Sea and Mediterranean", subtitle = "Ref6 and Ref7 combined (Individual ASV threads)")
+  )
+
+# 4. Clean Shared ASVs Metadata
+df_meta <- read.csv("ASVs_metadata100_gaps.csv", sep = ";")
+df_meta_clean <- df_meta %>%
+  group_by(study1, study2, ASVid2_1) %>%
+  summarise(
+    ASVs_destino_combinados = paste(unique(ASVid2_2), collapse = " | "),
+    Numero_de_Matches       = n_distinct(ASVid2_2),
+    Grupo_Principal         = paste(unique(ASVid2_1_bestgroup), collapse = " | "),
+    Taxonomia_Detallada     = paste(unique(ASVid2_1_sistergroup), collapse = " | "),
+    .groups = "drop"
+  )
+
+write.csv(df_meta_clean, "Metadata_ASVs_clean.csv", row.names = FALSE)
+
+
+# Section 3: COVERAGE-BASED RAREFACTION & EXTRAPOLATION (iNEXT)-----------------------------------------------------
+
+nombres_legibles <- c(
+  "Ref1"  = "Antarctica (Present study)",
+  "Ref2"  = "Asinara (Martínez et al. 2020)",
+  "Ref3"  = "Cordier et al. (2021)",
+  "Ref4"  = "Degenhardt et al. (2021)",
+  "Ref5"  = "Fonseca et al. (2017)",
+  "Ref6"  = "Haenel et al. (2017)",
+  "Ref7"  = "Atherton & Jondelius (2020)",
+  "Ref8"  = "Kapshyna et al. (2024)",
+  "Ref9"  = "Mazurkiewicz et al. (2024)",
+  "Ref10" = "Polinski et al. (2019)"
+)
+
+list_studies <- Ref_maestra %>%
+  filter(nreads > 0) %>%
+  mutate(dataset_name = ifelse(dataset %in% names(nombres_legibles), nombres_legibles[dataset], dataset)) %>%
+  split(.$dataset_name) %>%
+  lapply(function(df) df$nreads)
+
+# Parallel Processing Setup
+num_cores <- max(1, min(length(list_studies), detectCores() - 2))
+cl <- makeCluster(num_cores)
+clusterEvalQ(cl, library(iNEXT))
+clusterExport(cl, "list_studies")
+
+# 1. iNEXT Curves Parallel Computation
+inext_parallel_list <- parLapply(cl, list_studies, function(study_data) {
+  iNEXT(study_data, q = 0, datatype = "abundance", knots = 100, se = TRUE, conf = 0.95, nboot = 30)
+})
+
+stopCluster(cl)
+
+# 2. Consolidate iNEXT Objects
+study_names <- names(list_studies)
+names(inext_parallel_list) <- study_names
+for(nm in study_names) {
+  inext_parallel_list[[nm]]$DataInfo$Assemblage <- nm
+  inext_parallel_list[[nm]]$AsyEst$Assemblage <- nm
+  if (is.data.frame(inext_parallel_list[[nm]]$iNextEst)) {
+    inext_parallel_list[[nm]]$iNextEst$Assemblage <- nm
+  } else {
+    inext_parallel_list[[nm]]$iNextEst$size_based$Assemblage <- nm
+    inext_parallel_list[[nm]]$iNextEst$coverage_based$Assemblage <- nm
+  }
+}
+
+merge_inext_objects <- function(inext_list) {
+  combined_DataInfo <- do.call(rbind, lapply(inext_list, function(x) x$DataInfo))
+  combined_AsyEst   <- do.call(rbind, lapply(inext_list, function(x) x$AsyEst))
+  
+  if ("iNextEst" %in% names(inext_list[[1]])) {
+    if (is.data.frame(inext_list[[1]]$iNextEst)) {
+      combined_iNextEst <- do.call(rbind, lapply(inext_list, function(x) x$iNextEst))
+    } else {
+      combined_iNextEst <- list(
+        size_based     = do.call(rbind, lapply(inext_list, function(x) x$iNextEst$size_based)),
+        coverage_based = do.call(rbind, lapply(inext_list, function(x) x$iNextEst$coverage_based))
+      )
+    }
+  }
+  
+  res <- list(DataInfo = combined_DataInfo, iNextEst = combined_iNextEst, AsyEst = combined_AsyEst)
+  class(res) <- "iNEXT"
+  return(res)
+}
+
+inext_out <- merge_inext_objects(inext_parallel_list)
+
+# 3. Extract Table S5 directly from inext_out (Guarantees 100% match with Figure S2)
+cov_data <- inext_out$iNextEst$coverage_based
+
+table_s5_richness <- cov_data %>%
+  filter(Order.q == 0) %>%
+  group_by(Assemblage) %>%
+  slice(which.min(abs(SC - 0.95))) %>%
+  ungroup() %>%
+  select(
+    `Study Dataset` = Assemblage, 
+    `Coverage Level` = SC, 
+    `Standardized Richness (qD)` = qD, 
+    `95% CI Lower (LCL)` = qD.LCL, 
+    `95% CI Upper (UCL)` = qD.UCL
+  ) %>%
+  arrange(desc(`Standardized Richness (qD)`))
+
+write.csv(table_s5_richness, "Table_S5_Standardized_Richness_q0.csv", row.names = FALSE)
+
+
+# iNEXT Curves Parallel Computation
+inext_parallel_list <- parLapply(cl, list_studies, function(study_data) {
+  iNEXT(study_data, q = 0, datatype = "abundance", knots = 100, se = TRUE, conf = 0.95, nboot = 30)
+})
+
+stopCluster(cl)
+
+# Consolidate iNEXT Objects
+names(inext_parallel_list) <- study_names
+for(nm in study_names) {
+  inext_parallel_list[[nm]]$DataInfo$Assemblage <- nm
+  inext_parallel_list[[nm]]$AsyEst$Assemblage <- nm
+  if (is.data.frame(inext_parallel_list[[nm]]$iNextEst)) {
+    inext_parallel_list[[nm]]$iNextEst$Assemblage <- nm
+  } else {
+    inext_parallel_list[[nm]]$iNextEst$size_based$Assemblage <- nm
+    inext_parallel_list[[nm]]$iNextEst$coverage_based$Assemblage <- nm
+  }
+}
+
+merge_inext_objects <- function(inext_list) {
+  combined_DataInfo <- do.call(rbind, lapply(inext_list, function(x) x$DataInfo))
+  combined_AsyEst   <- do.call(rbind, lapply(inext_list, function(x) x$AsyEst))
+  
+  if ("iNextEst" %in% names(inext_list[[1]])) {
+    if (is.data.frame(inext_list[[1]]$iNextEst)) {
+      combined_iNextEst <- do.call(rbind, lapply(inext_list, function(x) x$iNextEst))
+    } else {
+      combined_iNextEst <- list(
+        size_based     = do.call(rbind, lapply(inext_list, function(x) x$iNextEst$size_based)),
+        coverage_based = do.call(rbind, lapply(inext_list, function(x) x$iNextEst$coverage_based))
+      )
+    }
+  }
+  
+  res <- list(DataInfo = combined_DataInfo, iNextEst = combined_iNextEst, AsyEst = combined_AsyEst)
+  class(res) <- "iNEXT"
+  return(res)
+}
+
+inext_out <- merge_inext_objects(inext_parallel_list)
+
+# Figure S2:  Coverage-Based Rarefaction Plot
+figure_S2 <- ggiNEXT(inext_out, type = 3) + 
+  coord_cartesian(xlim = c(0.80, 1.00)) +
+  scale_x_continuous(breaks = seq(0.80, 1.00, by = 0.05)) +
+  theme_bw() +
+  labs(
+    x = "Sample Coverage", 
+    y = "Standardized ASV Richness (q = 0)", 
+    title = "Coverage-based Rarefaction and Extrapolation"
+  ) +
+  theme(
+    legend.position = "right", 
+    plot.title = element_text(face = "bold", size = 12)
+  )
+
+ggsave("Figure_S2_Rarefaction.png", plot = figure_S2, width = 8, height = 6, dpi = 300)
+
+# Section 4: FIGURE 1 - SAMPLING MAPS------------------------------
+
+# 1. Ross Sea Satellite Zoom
+ecol_unique <- ecol_raw %>% distinct(longitude, latitude, .keep_all = TRUE)
+
+register_stadiamaps(key = "e629ead7-e2f7-4cbb-9529-d204a2aaf84d")
+satellite_map <- get_stadiamap(
+  bbox = c(left = 163.80, bottom = -74.80, right = 164.30, top = -74.65), 
+  zoom = 10, 
+  maptype = "stamen_terrain"
+)
+
+fig1_zoom <- ggmap(satellite_map) +
+  geom_point(data = ecol_unique, aes(x = longitude, y = latitude), color = "red", size = 1.85, alpha = 0.8) +
+  geom_text(data = ecol_unique, aes(x = longitude, y = latitude, label = ID), color = "black", size = 2.5, vjust = -1) +
+  labs(title = "Ross Sea sampling points", x = "Longitude", y = "Latitude") +
+  theme_minimal()
+
+# 2. Antarctic Overview Map
+antarctica <- ne_countries(scale = "medium", returnclass = "sf") %>% filter(sovereignt == "Antarctica")
+
+fig1_overview <- ggplot() +
+  geom_sf(data = antarctica, fill = "white", color = "black") +
+  coord_sf(xlim = c(-180, 180), ylim = c(-90, -60)) +
+  theme_minimal() +
+  labs(title = "Antarctica (Geographic projection)", x = "Longitude", y = "Latitude")
+
+
+# Section 5: FIGURE 2 - TAXONOMIC HEATMAP--------------------------------------
+
+# Prepare Heatmap Data Directly from Ref_maestra (No intermediate CSV re-reading)
+df_taxa_counts <- Ref_maestra %>%
+  filter(nreads > 0, !is.na(Best.group) & Best.group != "") %>%
+  group_by(dataset, taxa = Best.group) %>%
+  summarise(ASV_count = n_distinct(ASVid), .groups = "drop")
+
+totals_df <- df_taxa_counts %>%
+  group_by(Ref = dataset) %>%
+  summarise(Total_ASVs = sum(ASV_count, na.rm = TRUE), .groups = "drop")
+
+df_final <- df_taxa_counts %>%
+  rename(Ref = dataset) %>%
+  left_join(totals_df, by = "Ref") %>%
+  mutate(
+    percentage = (ASV_count / Total_ASVs) * 100,
+    alpha_val  = na_if(percentage, 0),
+    label_text = ifelse(is.na(alpha_val), "", paste0(round(percentage, 1)))
+  )
+
+totals_row <- totals_df %>%
+  mutate(
+    taxa = "Total ASVs",
+    ASV_count = Total_ASVs,
+    percentage = NA,
+    alpha_val = NA,
+    label_text = as.character(Total_ASVs)
+  )
+
+df_plot <- bind_rows(df_final, totals_row)
+
+orden_refs <- paste0("Ref", 1:10)
+df_plot$Ref <- factor(df_plot$Ref, levels = orden_refs)
+
+taxa_levels <- c(sort(unique(df_taxa_counts$taxa)), "Total ASVs")
+df_plot$taxa <- factor(df_plot$taxa, levels = taxa_levels)
+
+plot_heatmap <- ggplot(df_plot, aes(x = Ref, y = taxa)) +
+  geom_tile(aes(fill = Ref, alpha = alpha_val), color = "white", linewidth = 0.5) +
+  geom_text(aes(label = label_text), color = "black", size = 3) +
+  scale_fill_manual(values = paper_colors, guide = "none") + 
+  scale_alpha_continuous(range = c(0.2, 1), trans = "sqrt", name = "Relative Richness\n(% of ASVs)", na.value = 0) +
+  scale_y_discrete(limits = rev) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", color = paper_colors[levels(df_plot$Ref)]),
+    axis.text.y = element_text(size = 10, face = ifelse(rev(levels(df_plot$taxa)) == "Total ASVs", "bold", "plain")),
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "#fdfdfd", color = NA),
+    plot.title = element_text(face = "bold", hjust = 0.5, margin = margin(b=15))
+  ) +
+  labs(title = "ASV Composition by Taxonomic Group", x = "Reference", y = "Taxonomic Group")
+
+print(plot_heatmap)
+
+
+
+
+### Figure S1: Gaussian Distribution of ASVs < 95% Identity ----------------
+
+# 1. Extract Global Percentages (<95% identity) directly from Section 1 Data
+
+# External published studies
+published_vals <- sapply(seq_len(nrow(datasets_ext)), function(i) {
+  data <- read.csv(datasets_ext$filename[i], sep = ";", stringsAsFactors = FALSE)
+  meio <- data %>% 
+    filter(Eval.result == "correct", Tax.eco.meio %in% c("TRUE", TRUE)) %>%
+    mutate(similitud = as.numeric(str_split_i(label, "\\|", 4)))
+  mean(meio$similitud < 95.0, na.rm = TRUE) * 100
+})
+
+# Present study (Antarctica, post-27 noise threshold)
+our_study_val <- mean(ant_meio_clean$pident.max < 95.0, na.rm = TRUE) * 100
+
+
+# 2. Statistical Calculations (Fitted Gaussian Curve)
+mean_val <- mean(published_vals, na.rm = TRUE)
+sd_val   <- sd(published_vals, na.rm = TRUE)
+
+# Dynamic X-axis range for curve rendering
+x_min <- max(0, min(c(published_vals, our_study_val)) - 10)
+x_max <- min(100, max(c(published_vals, our_study_val)) + 10)
+x_val <- seq(x_min, x_max, length.out = 300)
+
+df_curve     <- data.frame(x = x_val, y = dnorm(x_val, mean = mean_val, sd = sd_val))
+df_published <- data.frame(x = published_vals, y = dnorm(published_vals, mean = mean_val, sd = sd_val))
+df_our       <- data.frame(x = our_study_val, y = dnorm(our_study_val, mean = mean_val, sd = sd_val))
+
+
+# 3. Render and Save Figure S1
+figure_S1 <- ggplot() +
+  # Gaussian Curve
+  geom_line(data = df_curve, aes(x = x, y = y), linewidth = 1, color = "black") +
+  # Benchmark Studies (Red Dots)
+  geom_point(data = df_published, aes(x = x, y = y), color = "red", size = 3.5) +
+  # Present Study (Blue Triangle)
+  geom_point(data = df_our, aes(x = x, y = y), shape = 17, color = "blue", size = 5) +
+  # Theme and Formatting
   labs(
     x = "percentage",
     y = "density"
   ) +
+  theme_bw(base_size = 14) +
   theme(
-    panel.grid.minor = element_blank()
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "black")
   )
+
+ggsave("Figure_S1_Gaussian_Novelty.png", plot = figure_S1, width = 7, height = 6, dpi = 300)
