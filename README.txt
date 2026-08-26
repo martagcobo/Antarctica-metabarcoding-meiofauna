@@ -3,7 +3,7 @@
 This repository contains the R scripts and datasets used for the analysis of meiofaunal communities in the Antarctic region using 18S rRNA metabarcoding. It includes comparative analyses with previously published surveys from different biogeographical regions.
 
 # Authors: (anonymus until peer-review process is finished).
-# Last update: 17/05/2026
+# Last update: 26/08/2026. New version of the script uploaded after major revision
 
 ## Overview of Analyses
 
