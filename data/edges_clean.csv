@@ -1,0 +1,15 @@
+from;to;weight
+Ref6+7;Ref8;91
+Ref2;Ref6+7;26
+Ref10;Ref6+7;21
+Ref1;Ref5;15
+Ref1;Ref6+7;4
+Ref1;Ref10;3
+Ref10;Ref8;2
+Ref10;Ref9;2
+Ref2;Ref8;2
+Ref4;Ref6+7;2
+Ref10;Ref2;1
+Ref3;Ref6+7;1
+Ref4;Ref8;1
+Ref5;Ref6+7;1
