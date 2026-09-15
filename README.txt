@@ -20,12 +20,12 @@ This repository contains the R scripts and datasets used for the analysis of mei
 │   ├── edges_clean.csv
 │   ├── stations network.csv
 │   └── taxa_counts_meiofauna.csv
-└── scripts/
+└── script/
     └── Antarctica_script.R
 
 
 * **`data/`**: Contains all raw and processed data matrices required to run the workflow.
-* **`scripts/`**: Contains the main R script executing ecological, statistical, and spatial analyses.
+* **`script/`**: Contains the main R script executing ecological, statistical, and spatial analyses.
 *(Bioinformatic processing prior to ecological analysis followed the NGSmeioR workflow: https://github.com/amartinezgarcia/NGSmeioR.git)*
 
 ---
@@ -57,7 +57,29 @@ Antarctica_script.R: Main R script executing alpha/beta diversity metrics, spati
 
 ## Software & Environment
 
-All statistical analyses were executed in R. Package versions and environment parameters used for this work are recorded via `sessionInfo()` at the end of `scripts/Antarctica_analyses.R`.
+All statistical analyses were executed in R. Package versions and environment parameters used for this work are recorded via `sessionInfo()` at the end of `scripts/Antarctica_script.R`.
+
+### Package Dependencies & Installation
+
+This project requires packages from both CRAN and Bioconductor. To set up the environment and install all dependencies, run the following commands in R:
+
+```R
+# 1. Standard CRAN packages
+cran_packages <- c(
+  "tidyverse", "patchwork", "sjPlot", "scales", "ggrepel", 
+  "vegan", "BAT", "glmmTMB", "performance", "emmeans", "ggeffects", "iNEXT", 
+  "ape", "phytools", "phangorn", 
+  "sf", "rnaturalearth", "marmap", "ggmap", 
+  "flextable", "officer", "tidygraph", "ggraph", "pheatmap", "writexl", 
+  "here"
+)
+install.packages(setdiff(cran_packages, rownames(installed.packages())))
+
+# 2. Bioconductor packages
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+BiocManager::install(c("Biostrings", "DECIPHER", "msa"))
 
 ## License
 
