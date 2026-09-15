@@ -23,7 +23,7 @@ This repository contains the R scripts and datasets used for the analysis of mei
 └── script/
     └── Antarctica_script.R
 
-
+* **.Rproj** & **.here**: RStudio project configuration files that automatically anchor the project root directory using the here package
 * **`data/`**: Contains all raw and processed data matrices required to run the workflow.
 * **`script/`**: Contains the main R script executing ecological, statistical, and spatial analyses.
 *(Bioinformatic processing prior to ecological analysis followed the NGSmeioR workflow: https://github.com/amartinezgarcia/NGSmeioR.git)*
@@ -57,7 +57,7 @@ Antarctica_script.R: Main R script executing alpha/beta diversity metrics, spati
 
 ## Software & Environment
 
-All statistical analyses were executed in R. Package versions and environment parameters used for this work are recorded via `sessionInfo()` at the end of `scripts/Antarctica_script.R`.
+All statistical analyses were executed in R. Package versions and environment parameters used for this work are recorded via `sessionInfo()` at the end of `script/Antarctica_script.R`.
 
 ### Package Dependencies & Installation
 
