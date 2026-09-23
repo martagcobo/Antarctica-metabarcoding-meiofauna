@@ -1,7 +1,8 @@
 #################################
 # Antarctic meiofauna metabarcoding paper 
 #
-# Script by: anynonymus for peer-review.
+# Script by: Marta García-Cobo, Diego Fontaneto, Ester M. Eckert, Raffaella Sabatino,
+#Matteo Cecchetto, Stefano Schiaparelli, Alejandro Martínez
 # Last update: 15/09/2026
 
 
